@@ -1,0 +1,11 @@
+[graphics]
+backend = "vulkan" # vulkan | opengl
+vsync = true
+
+[window]
+width = 1280
+height = 720
+title = "Tokenburner"
+
+[input]
+mouse_sensitivity = 0.12

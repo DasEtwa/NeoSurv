@@ -1,0 +1,27 @@
+[workspace]
+members = [
+  "crates/engine",
+  "crates/sandbox",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Max", "Liv"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
+glam = { version = "0.30", features = ["serde"] }
+legion = "0.4"
+noise = "0.9"
+rayon = "1.10"
+winit = "0.30"
+egui = "0.33"
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "x11", "wayland"] }
+wgpu = "27"
