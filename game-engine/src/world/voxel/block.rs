@@ -9,6 +9,8 @@ pub(crate) enum BlockType {
     Dirt = 2,
     Stone = 3,
     Sand = 4,
+    BorderWall = 5,
+    Dummy = 6,
 }
 
 impl BlockType {

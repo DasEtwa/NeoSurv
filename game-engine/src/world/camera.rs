@@ -73,7 +73,14 @@ impl Default for CameraController {
 }
 
 impl CameraController {
-    pub(crate) fn update(&self, camera: &mut Camera, move_axis: Vec3, mouse_delta: Vec2, dt: f32) {
+    pub(crate) fn update(
+        &self,
+        camera: &mut Camera,
+        move_axis: Vec3,
+        mouse_delta: Vec2,
+        dt: f32,
+        speed_multiplier: f32,
+    ) {
         camera.yaw += mouse_delta.x * self.mouse_sensitivity;
         camera.pitch -= mouse_delta.y * self.mouse_sensitivity;
         camera.pitch = camera.pitch.clamp(-MAX_PITCH_DEGREES, MAX_PITCH_DEGREES);
@@ -84,6 +91,7 @@ impl CameraController {
 
         let movement = (planar_forward * -move_axis.z + right * move_axis.x).normalize_or_zero()
             * self.move_speed
+            * speed_multiplier.max(0.0)
             * dt;
 
         camera.position += movement;

@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     io::ErrorKind,
     sync::Arc,
     time::{Duration, Instant},
@@ -27,9 +28,15 @@ use crate::{
         camera::{Camera, CameraController},
         scene::Scene,
         scene_manager::SceneManager,
-        voxel::{ChunkMeshUpdate, VoxelWorld},
+        voxel::{ChunkMeshUpdate, VoxelWorld, block::BlockType},
     },
 };
+
+#[derive(Debug, Clone, Copy)]
+struct PendingBlockWrite {
+    world: IVec3,
+    block: BlockType,
+}
 
 pub(crate) fn run(config: AppConfig) -> Result<()> {
     let event_loop = EventLoop::new()?;
@@ -43,7 +50,11 @@ const CHUNK_VISIBILITY_RADIUS: u32 = 4;
 const MAX_MESH_UPDATES_TO_RENDERER_PER_FRAME: usize = 64;
 const CHUNK_UPLOAD_BUDGET_BYTES_PER_FRAME: usize = 2 * 1024 * 1024;
 const STREAM_TELEMETRY_INTERVAL_FRAMES: u64 = 120;
-const PLAYER_EYE_TO_FEET: f32 = 1.6;
+const WORLD_BORDER_SIZE_BLOCKS: f32 = 250.0;
+const WORLD_BORDER_HALF_EXTENT: f32 = WORLD_BORDER_SIZE_BLOCKS * 0.5;
+const WORLD_BORDER_WALKABLE_HALF_EXTENT: f32 = WORLD_BORDER_HALF_EXTENT - 1.0 - PLAYER_COLLISION_RADIUS;
+const PLAYER_EYE_TO_FEET_STANDING: f32 = 1.6;
+const PLAYER_EYE_TO_FEET_CROUCHING: f32 = 1.1;
 const PLAYER_COLLISION_RADIUS: f32 = 0.25;
 const SPAWN_SURFACE_SEARCH_TOP_Y: i32 = 96;
 const SPAWN_SURFACE_SEARCH_BOTTOM_Y: i32 = -32;
@@ -55,6 +66,15 @@ const PLAYER_GROUND_PROBE_EPSILON: f32 = 0.08;
 const PLAYER_VERTICAL_SWEEP_STEP: f32 = 0.05;
 const PLAYER_TORSO_PROBE_FROM_EYE: f32 = 0.8;
 const PLAYER_FEET_CLEARANCE_PROBE: f32 = 0.05;
+const PLAYER_SPRINT_MULTIPLIER: f32 = 1.6;
+const PLAYER_CROUCH_SPEED_MULTIPLIER: f32 = 0.45;
+const WEAPON_HITSCAN_RANGE: f32 = 96.0;
+const WEAPON_SHOT_DAMAGE: i32 = 34;
+const DUMMY_MAX_HP: i32 = 100;
+const MAX_PENDING_BLOCK_WRITES_PER_FRAME: usize = 4096;
+const BORDER_WALL_MIN_Y: i32 = -4;
+const BORDER_WALL_MAX_Y: i32 = 48;
+const DUMMY_HEIGHT_OVER_SURFACE: i32 = 2;
 
 fn default_voxel_worker_count() -> usize {
     std::thread::available_parallelism()
@@ -86,6 +106,15 @@ struct EngineApp {
     menu_open: bool,
     vertical_velocity: f32,
     is_grounded: bool,
+    is_crouching: bool,
+    shoot_requested: bool,
+    border_walls_enqueued: bool,
+    dummies_spawned: bool,
+    pending_block_writes: VecDeque<PendingBlockWrite>,
+    dummy_hp: HashMap<IVec3, i32>,
+    dummy_spawned_slots: HashSet<usize>,
+    dummy_spawn_anchor: Option<IVec3>,
+    dummy_kills: u32,
 }
 
 impl EngineApp {
@@ -155,6 +184,15 @@ impl EngineApp {
             menu_open: false,
             vertical_velocity: 0.0,
             is_grounded: false,
+            is_crouching: false,
+            shoot_requested: false,
+            border_walls_enqueued: false,
+            dummies_spawned: false,
+            pending_block_writes: VecDeque::new(),
+            dummy_hp: HashMap::new(),
+            dummy_spawned_slots: HashSet::new(),
+            dummy_spawn_anchor: None,
+            dummy_kills: 0,
         }
     }
 
@@ -263,6 +301,174 @@ impl EngineApp {
             .unwrap_or(false)
     }
 
+    fn current_eye_to_feet(&self) -> f32 {
+        if self.is_crouching {
+            PLAYER_EYE_TO_FEET_CROUCHING
+        } else {
+            PLAYER_EYE_TO_FEET_STANDING
+        }
+    }
+
+    fn clamp_to_world_border(&mut self) {
+        self.camera.position.x = self
+            .camera
+            .position
+            .x
+            .clamp(
+                -WORLD_BORDER_WALKABLE_HALF_EXTENT,
+                WORLD_BORDER_WALKABLE_HALF_EXTENT,
+            );
+        self.camera.position.z = self
+            .camera
+            .position
+            .z
+            .clamp(
+                -WORLD_BORDER_WALKABLE_HALF_EXTENT,
+                WORLD_BORDER_WALKABLE_HALF_EXTENT,
+            );
+    }
+
+    fn enqueue_block_write(&mut self, world: IVec3, block: BlockType) {
+        self.pending_block_writes
+            .push_back(PendingBlockWrite { world, block });
+    }
+
+    fn process_pending_block_writes(&mut self) {
+        let budget = MAX_PENDING_BLOCK_WRITES_PER_FRAME.min(self.pending_block_writes.len());
+
+        for _ in 0..budget {
+            let Some(write) = self.pending_block_writes.pop_front() else {
+                break;
+            };
+
+            if !self.voxel_world.set_block_world(write.world, write.block) {
+                self.pending_block_writes.push_back(write);
+            }
+        }
+    }
+
+    fn ensure_border_walls_enqueued(&mut self) {
+        if self.border_walls_enqueued {
+            return;
+        }
+
+        let half = WORLD_BORDER_HALF_EXTENT as i32;
+        let before = self.pending_block_writes.len();
+
+        for y in BORDER_WALL_MIN_Y..=BORDER_WALL_MAX_Y {
+            for x in -half..=half {
+                self.enqueue_block_write(IVec3::new(x, y, -half), BlockType::BorderWall);
+                self.enqueue_block_write(IVec3::new(x, y, half), BlockType::BorderWall);
+            }
+
+            for z in (-half + 1)..=(half - 1) {
+                self.enqueue_block_write(IVec3::new(-half, y, z), BlockType::BorderWall);
+                self.enqueue_block_write(IVec3::new(half, y, z), BlockType::BorderWall);
+            }
+        }
+
+        let queued = self.pending_block_writes.len().saturating_sub(before);
+        self.border_walls_enqueued = true;
+        tracing::info!(queued_blocks = queued, "border wall block jobs enqueued");
+    }
+
+    fn find_surface_height(&self, x: i32, z: i32) -> Option<i32> {
+        for y in (SPAWN_SURFACE_SEARCH_BOTTOM_Y..=SPAWN_SURFACE_SEARCH_TOP_Y).rev() {
+            if self.voxel_world.block_at_world(IVec3::new(x, y, z)).is_some() {
+                return Some(y);
+            }
+        }
+
+        None
+    }
+
+    fn ensure_dummies_spawned(&mut self) {
+        if self.dummies_spawned || !self.spawn_aligned_to_world {
+            return;
+        }
+
+        const DUMMY_OFFSETS: [(i32, i32); 6] =
+            [(-4, -12), (0, -12), (4, -12), (-8, -20), (0, -20), (8, -20)];
+
+        let Some(anchor) = self.dummy_spawn_anchor else {
+            return;
+        };
+
+        for (slot, (dx, dz)) in DUMMY_OFFSETS.into_iter().enumerate() {
+            if self.dummy_spawned_slots.contains(&slot) {
+                continue;
+            }
+
+            let x = anchor.x + dx;
+            let z = anchor.z + dz;
+            let Some(surface) = self.find_surface_height(x, z) else {
+                continue;
+            };
+
+            let pos = IVec3::new(x, surface + DUMMY_HEIGHT_OVER_SURFACE, z);
+            self.enqueue_block_write(pos, BlockType::Dummy);
+            self.dummy_hp.insert(pos, DUMMY_MAX_HP);
+            self.dummy_spawned_slots.insert(slot);
+            tracing::info!(slot, x, y = pos.y, z, "dummy spawn queued");
+        }
+
+        if self.dummy_spawned_slots.len() == DUMMY_OFFSETS.len() {
+            self.dummies_spawned = true;
+            tracing::info!(dummy_count = self.dummy_hp.len(), "dummy targets spawned");
+        }
+    }
+
+    fn fire_hitscan_shot(&mut self) {
+        let Some(hit) =
+            self.voxel_world
+                .raycast(self.camera.position, self.camera.forward(), WEAPON_HITSCAN_RANGE)
+        else {
+            tracing::debug!("shot miss");
+            return;
+        };
+
+        if hit.block != BlockType::Dummy {
+            tracing::debug!(
+                block = ?hit.block,
+                x = hit.block_pos.x,
+                y = hit.block_pos.y,
+                z = hit.block_pos.z,
+                "shot impacted non-dummy block"
+            );
+            return;
+        }
+
+        let Some(previous_hp) = self.dummy_hp.get(&hit.block_pos).copied() else {
+            // Fallback in case HP table was lost but the block still exists.
+            self.enqueue_block_write(hit.block_pos, BlockType::Air);
+            return;
+        };
+
+        let remaining_hp = previous_hp - WEAPON_SHOT_DAMAGE;
+        if remaining_hp <= 0 {
+            self.dummy_hp.remove(&hit.block_pos);
+            self.enqueue_block_write(hit.block_pos, BlockType::Air);
+            self.dummy_kills = self.dummy_kills.saturating_add(1);
+            tracing::info!(
+                x = hit.block_pos.x,
+                y = hit.block_pos.y,
+                z = hit.block_pos.z,
+                kills = self.dummy_kills,
+                remaining_dummies = self.dummy_hp.len(),
+                "dummy destroyed"
+            );
+        } else {
+            self.dummy_hp.insert(hit.block_pos, remaining_hp);
+            tracing::info!(
+                x = hit.block_pos.x,
+                y = hit.block_pos.y,
+                z = hit.block_pos.z,
+                hp = remaining_hp,
+                "dummy hit"
+            );
+        }
+    }
+
     fn try_align_spawn_to_surface(&mut self) {
         if self.spawn_aligned_to_world {
             return;
@@ -274,10 +480,12 @@ impl EngineApp {
         for y in (SPAWN_SURFACE_SEARCH_BOTTOM_Y..=SPAWN_SURFACE_SEARCH_TOP_Y).rev() {
             let world = IVec3::new(column_x, y, column_z);
             if self.voxel_world.block_at_world(world).is_some() {
-                self.camera.position.y = y as f32 + 1.0 + PLAYER_EYE_TO_FEET + SPAWN_EYE_CLEARANCE;
+                self.camera.position.y =
+                    y as f32 + 1.0 + self.current_eye_to_feet() + SPAWN_EYE_CLEARANCE;
                 self.vertical_velocity = 0.0;
                 self.is_grounded = true;
                 self.spawn_aligned_to_world = true;
+                self.dummy_spawn_anchor = Some(IVec3::new(column_x, 0, column_z));
                 tracing::info!(
                     cam_x = self.camera.position.x,
                     cam_y = self.camera.position.y,
@@ -342,12 +550,11 @@ impl EngineApp {
         ]
     }
 
-    fn is_camera_position_walkable(&self, position: Vec3) -> bool {
+    fn is_camera_position_walkable_with_eye_to_feet(&self, position: Vec3, eye_to_feet: f32) -> bool {
         for offset in Self::collision_offsets() {
             let eye_probe = position + offset;
             let torso_probe = eye_probe - Vec3::Y * PLAYER_TORSO_PROBE_FROM_EYE;
-            let feet_clear_probe =
-                eye_probe - Vec3::Y * (PLAYER_EYE_TO_FEET - PLAYER_FEET_CLEARANCE_PROBE);
+            let feet_clear_probe = eye_probe - Vec3::Y * (eye_to_feet - PLAYER_FEET_CLEARANCE_PROBE);
 
             if self
                 .voxel_world
@@ -369,10 +576,41 @@ impl EngineApp {
         true
     }
 
+    fn is_camera_position_walkable(&self, position: Vec3) -> bool {
+        self.is_camera_position_walkable_with_eye_to_feet(position, self.current_eye_to_feet())
+    }
+
+    fn update_crouch_state(&mut self, crouch_requested: bool) {
+        if crouch_requested {
+            if self.is_crouching {
+                return;
+            }
+
+            let delta = PLAYER_EYE_TO_FEET_STANDING - PLAYER_EYE_TO_FEET_CROUCHING;
+            self.camera.position.y -= delta;
+            self.is_crouching = true;
+            return;
+        }
+
+        if !self.is_crouching {
+            return;
+        }
+
+        let delta = PLAYER_EYE_TO_FEET_STANDING - PLAYER_EYE_TO_FEET_CROUCHING;
+        let standing_candidate = self.camera.position + Vec3::Y * delta;
+        if self.is_camera_position_walkable_with_eye_to_feet(
+            standing_candidate,
+            PLAYER_EYE_TO_FEET_STANDING,
+        ) {
+            self.camera.position = standing_candidate;
+            self.is_crouching = false;
+        }
+    }
+
     fn is_standing_on_solid_ground(&self, position: Vec3) -> bool {
+        let eye_to_feet = self.current_eye_to_feet();
         for offset in Self::collision_offsets() {
-            let ground_probe =
-                position + offset - Vec3::Y * (PLAYER_EYE_TO_FEET + PLAYER_GROUND_PROBE_EPSILON);
+            let ground_probe = position + offset - Vec3::Y * (eye_to_feet + PLAYER_GROUND_PROBE_EPSILON);
             if self
                 .voxel_world
                 .block_at_world(ground_probe.floor().as_ivec3())
@@ -502,6 +740,21 @@ impl EngineApp {
         } else {
             self.input.frame_movement_axis()
         };
+
+        let crouch_requested = !self.menu_open && self.input.is_key_pressed(KeyCode::KeyV);
+        self.update_crouch_state(crouch_requested);
+
+        let sprint_pressed = !self.menu_open
+            && (self.input.is_key_pressed(KeyCode::ShiftLeft)
+                || self.input.is_key_pressed(KeyCode::ShiftRight));
+        let speed_multiplier = if self.is_crouching {
+            PLAYER_CROUCH_SPEED_MULTIPLIER
+        } else if sprint_pressed {
+            PLAYER_SPRINT_MULTIPLIER
+        } else {
+            1.0
+        };
+
         let mouse_delta = if self.mouse_captured {
             self.input.take_mouse_delta()
         } else {
@@ -510,12 +763,23 @@ impl EngineApp {
         };
         let previous_camera_position = self.camera.position;
         self.camera_controller
-            .update(&mut self.camera, move_axis, mouse_delta, dt_seconds);
+            .update(&mut self.camera, move_axis, mouse_delta, dt_seconds, speed_multiplier);
         self.apply_block_collision_to_camera_movement(previous_camera_position);
+        self.clamp_to_world_border();
 
         let voxel_report = self.voxel_world.tick(self.camera.position);
         self.try_align_spawn_to_surface();
         self.apply_jump_and_gravity(dt_seconds);
+        self.clamp_to_world_border();
+        self.ensure_dummies_spawned();
+        self.ensure_border_walls_enqueued();
+        self.process_pending_block_writes();
+
+        if self.shoot_requested && self.mouse_captured && !self.menu_open {
+            self.fire_hitscan_shot();
+        }
+        self.shoot_requested = false;
+
         if voxel_report.completed > 0
             || voxel_report.mesh_updates_queued > 0
             || (self.frame_index.is_multiple_of(240) && voxel_report.pending_chunks > 0)
@@ -685,7 +949,7 @@ impl EngineApp {
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.set_mouse_captured(true);
-        tracing::info!("controls: WASD move, SPACE jump, ESC menu/unlock, left-click recapture, TAB/F1 toggle capture");
+        tracing::info!("controls: WASD move, SHIFT sprint, V crouch, SPACE jump, LMB shoot (hitscan), ESC menu/unlock, left-click recapture, TAB/F1 toggle capture");
         Ok(())
     }
 }
@@ -745,6 +1009,8 @@ impl ApplicationHandler for EngineApp {
             } => {
                 if !self.mouse_captured {
                     self.set_mouse_captured(true);
+                } else if !self.menu_open {
+                    self.shoot_requested = true;
                 }
             }
             WindowEvent::Resized(new_size) => {
@@ -803,6 +1069,14 @@ impl ApplicationHandler for EngineApp {
         event: DeviceEvent,
     ) {
         if self.mouse_captured {
+            if let DeviceEvent::Button {
+                button: 1,
+                state: ElementState::Pressed,
+            } = &event
+                && !self.menu_open
+            {
+                self.shoot_requested = true;
+            }
             self.input.handle_device_event(&event);
         }
     }

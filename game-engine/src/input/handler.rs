@@ -48,6 +48,10 @@ impl InputHandler {
         self.just_pressed_keys.remove(&key)
     }
 
+    pub(crate) fn is_key_pressed(&self, key: KeyCode) -> bool {
+        self.pressed_keys.contains(&key)
+    }
+
     pub(crate) fn frame_movement_axis(&self) -> Vec3 {
         let mut dir = Vec3::ZERO;
 

@@ -276,6 +276,26 @@ impl VoxelWorld {
             .filter(|block| block.is_solid())
     }
 
+    pub(crate) fn set_block_world(&mut self, world: IVec3, block: BlockType) -> bool {
+        let (chunk_coord, local) = split_world_position(world);
+
+        {
+            let Some(chunk) = self.chunks.get_mut(&chunk_coord) else {
+                return false;
+            };
+
+            if chunk.block(local) == block {
+                return true;
+            }
+
+            chunk.set_block(local, block);
+        }
+
+        let _ = self.mark_chunk_dirty_for_remesh(chunk_coord);
+        self.mark_adjacent_chunks_dirty_for_remesh(chunk_coord);
+        true
+    }
+
     pub(crate) fn raycast(
         &self,
         origin: Vec3,

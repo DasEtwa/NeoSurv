@@ -33,6 +33,12 @@ fn material_color(material_id: u32) -> vec3<f32> {
         case 4u: {
             return vec3<f32>(0.82, 0.72, 0.45); // sand
         }
+        case 5u: {
+            return vec3<f32>(0.12, 0.20, 0.85); // border wall
+        }
+        case 6u: {
+            return vec3<f32>(0.90, 0.15, 0.15); // dummy target
+        }
         default: {
             return vec3<f32>(0.85, 0.2, 0.85); // fallback/missing
         }
