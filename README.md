@@ -48,7 +48,7 @@ Expect refactors, unfinished systems, and larger structural changes as developme
 
 ## License
 
-Code in this repository is licensed under the MIT License.
+Unless otherwise noted, the source code in this repository is licensed under the GNU General Public License v3.0.
 
-Some third-party assets may be included and are licensed separately.
+This repository may also contain third-party assets and materials that are licensed separately.
 See `THIRD_PARTY_NOTICES.md` for more information.
