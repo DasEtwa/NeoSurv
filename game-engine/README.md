@@ -68,8 +68,3 @@ vsync = true
 ```
 
 Standardziel: `/mnt/z/Workspace/game-engine` (entspricht `Z:\Workspace\game-engine`)
-
-## Hinweis zu `legion`
-
-Die aktuell verfügbare stabile Version auf crates.io ist `0.4.x`.
-Wenn du zwingend `~0.7` willst, brauchen wir ein alternatives ECS oder einen Fork/anderen Branch.
