@@ -1,4 +1,4 @@
-# Game
+# NeoSurv
 
 A voxel-based 3D game written in Rust with `wgpu` and `winit`.
 
