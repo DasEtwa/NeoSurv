@@ -1,70 +1,14 @@
-# Tokenburner Engine Foundation
+# Game Engine
 
-WSL2-first Rust Game-Engine Fundament mit Windows-Mirror nach `Z:\Workspace`.
+Dies ist der Kern des Voxel-Shooters **NeoSurv** (ehemals "Game").
 
-## Ziel (Milestone 1)
+- Rendering mit **wgpu**
+- Voxel-Welt + Meshing
+- Player Movement + Shooting
+- Enemy-System (erste NPCs)
+- OBJ-Waffen-Modelle
+- Save/Load-System
 
-- Fenster + Event-Loop (`winit`)
-- wgpu Surface/Device Init
-- Clear-Screen Render (dynamische Farbe pro Frame)
-- WASD + Mouse-Look Input erfasst
-- `Config.toml` Backend-Switch (Vulkan/OpenGL)
-- Stabil bei Resize + Close
+Der eigentliche Einstiegspunkt ist `src/main.rs`.
 
-## Struktur
-
-```
-.
-├── Cargo.toml
-├── Config.toml
-├── src/
-│   ├── main.rs
-│   ├── engine.rs
-│   ├── renderer/
-│   │   ├── mod.rs
-│   │   ├── backend_trait.rs
-│   │   ├── vulkan.rs
-│   │   └── opengl.rs
-│   ├── ecs/
-│   │   ├── components.rs
-│   │   ├── systems.rs
-│   │   └── resources.rs
-│   ├── input/
-│   │   └── handler.rs
-│   ├── editor/
-│   │   └── gui.rs
-│   ├── world/
-│   │   ├── scene.rs
-│   │   └── save_load.rs
-│   └── config.rs
-├── assets/
-│   └── shaders/
-└── legacy/
-    ├── cpp-bootstrap/
-    └── rust-workspace-v1/
-```
-
-## Build & Run (WSL)
-
-```bash
-cd /home/max/.openclaw/workspace/game-engine
-cargo run
-```
-
-## Config wechseln
-
-`Config.toml`:
-
-```toml
-[graphics]
-backend = "vulkan" # oder "opengl"
-vsync = true
-```
-
-## Windows Mirror
-
-```bash
-./scripts/sync_to_windows.sh
-```
-
-Standardziel: `/mnt/z/Workspace/game-engine` (entspricht `Z:\Workspace\game-engine`)
+Siehe Haupt-README im Root für mehr Infos, Screenshots und Build-Anleitung.
