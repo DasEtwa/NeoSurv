@@ -7,11 +7,13 @@ use std::{
 use anyhow::{Context, Result};
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
+use image::{GenericImage, ImageReader, RgbaImage};
 use wgpu::util::DeviceExt;
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::{
     config::GraphicsBackend,
+    game::model::StaticModelMesh as CpuStaticModelMesh,
     world::voxel::{
         chunk::ChunkCoord,
         meshing::{ChunkMesh, MeshVertex},
@@ -47,6 +49,40 @@ pub(crate) struct VoxelFrameStats {
     pub(crate) pending_uploads: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct StaticModelMesh {
+    pub(crate) label: String,
+    pub(crate) vertices: Vec<StaticModelVertex>,
+    pub(crate) indices: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StaticModelVertex {
+    pub(crate) position: [f32; 3],
+    pub(crate) normal: [f32; 3],
+    pub(crate) uv: [f32; 2],
+    pub(crate) color: [f32; 4],
+}
+
+impl From<CpuStaticModelMesh> for StaticModelMesh {
+    fn from(value: CpuStaticModelMesh) -> Self {
+        Self {
+            label: value.label,
+            vertices: value
+                .vertices
+                .into_iter()
+                .map(|vertex| StaticModelVertex {
+                    position: vertex.position,
+                    normal: vertex.normal,
+                    uv: vertex.uv,
+                    color: vertex.color,
+                })
+                .collect(),
+            indices: value.indices,
+        }
+    }
+}
+
 pub(crate) struct Renderer {
     inner: WgpuBackend,
 }
@@ -79,6 +115,14 @@ impl Renderer {
 
     pub(crate) fn take_voxel_frame_stats(&mut self) -> VoxelFrameStats {
         self.inner.take_voxel_frame_stats()
+    }
+
+    pub(crate) fn replace_static_model_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
+        self.inner.replace_static_model_meshes(meshes);
+    }
+
+    pub(crate) fn replace_viewmodel_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
+        self.inner.replace_viewmodel_meshes(meshes);
     }
 }
 
@@ -176,6 +220,50 @@ struct GpuChunkMesh {
     index_count: u32,
 }
 
+struct GpuStaticModelMesh {
+    _label: String,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuStaticModelVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+    color: [f32; 4],
+}
+
+impl GpuStaticModelVertex {
+    fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+            0 => Float32x3,
+            1 => Float32x3,
+            2 => Float32x2,
+            3 => Float32x4
+        ];
+
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<GpuStaticModelVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        }
+    }
+}
+
+impl From<StaticModelVertex> for GpuStaticModelVertex {
+    fn from(value: StaticModelVertex) -> Self {
+        Self {
+            position: value.position,
+            normal: value.normal,
+            uv: value.uv,
+            color: value.color,
+        }
+    }
+}
+
 enum ChunkUploadOp {
     Upsert {
         coord: ChunkCoord,
@@ -196,16 +284,21 @@ struct WgpuBackend {
     backend_name: &'static str,
     quad_pipeline: wgpu::RenderPipeline,
     voxel_pipeline: wgpu::RenderPipeline,
+    static_model_pipeline: wgpu::RenderPipeline,
+    viewmodel_pipeline: wgpu::RenderPipeline,
     quad_vertex_buffer: wgpu::Buffer,
     quad_index_buffer: wgpu::Buffer,
     quad_index_count: u32,
     texture_bind_group: wgpu::BindGroup,
+    block_texture_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     depth_format: wgpu::TextureFormat,
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     chunk_meshes: HashMap<ChunkCoord, GpuChunkMesh>,
+    static_model_meshes: Vec<GpuStaticModelMesh>,
+    viewmodel_meshes: Vec<GpuStaticModelMesh>,
     pending_chunk_uploads: VecDeque<ChunkUploadOp>,
     visible_chunks: HashSet<ChunkCoord>,
     upload_budget_bytes_per_frame: usize,
@@ -350,6 +443,13 @@ impl WgpuBackend {
             ),
         });
 
+        let static_model_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("tokenburner-static-model-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../assets/shaders/model.wgsl").into(),
+            ),
+        });
+
         let quad_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("tokenburner-textured-pipeline-layout"),
             bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
@@ -393,7 +493,7 @@ impl WgpuBackend {
         let voxel_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("tokenburner-voxel-pipeline-layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &texture_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -420,6 +520,84 @@ impl WgpuBackend {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &voxel_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let static_model_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("tokenburner-static-model-pipeline-layout"),
+                bind_group_layouts: &[&camera_bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let static_model_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("tokenburner-static-model-pipeline"),
+                layout: Some(&static_model_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &static_model_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[GpuStaticModelVertex::layout()],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: depth_format,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &static_model_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        let viewmodel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tokenburner-viewmodel-pipeline"),
+            layout: Some(&static_model_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &static_model_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GpuStaticModelVertex::layout()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &static_model_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
@@ -533,6 +711,9 @@ impl WgpuBackend {
             ],
         });
 
+        let block_texture_bind_group =
+            Self::create_block_texture_bind_group(&device, &queue, &texture_bind_group_layout)?;
+
         let (depth_texture, depth_view) =
             Self::create_depth_resources(&device, &config, depth_format);
 
@@ -544,16 +725,21 @@ impl WgpuBackend {
             backend_name,
             quad_pipeline,
             voxel_pipeline,
+            static_model_pipeline,
+            viewmodel_pipeline,
             quad_vertex_buffer,
             quad_index_buffer,
             quad_index_count: QUAD_INDICES.len() as u32,
             texture_bind_group,
+            block_texture_bind_group,
             camera_buffer,
             camera_bind_group,
             depth_format,
             _depth_texture: depth_texture,
             depth_view,
             chunk_meshes: HashMap::new(),
+            static_model_meshes: Vec::new(),
+            viewmodel_meshes: Vec::new(),
             pending_chunk_uploads: VecDeque::new(),
             visible_chunks: HashSet::new(),
             upload_budget_bytes_per_frame: 2 * 1024 * 1024,
@@ -583,6 +769,111 @@ impl WgpuBackend {
 
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
         (depth_texture, depth_view)
+    }
+
+    fn create_block_texture_bind_group(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Result<wgpu::BindGroup> {
+        const TILE_SIZE: u32 = 16;
+        const ATLAS_COLUMNS: u32 = 4;
+        const ATLAS_ROWS: u32 = 2;
+        const TILE_FILES: [&str; 5] = [
+            "assets/textures/blocks/grass_top.png",
+            "assets/textures/blocks/grass_side.png",
+            "assets/textures/blocks/grass_bottom.png",
+            "assets/textures/blocks/stone.png",
+            "assets/textures/blocks/sand.png",
+        ];
+
+        let mut atlas = RgbaImage::new(TILE_SIZE * ATLAS_COLUMNS, TILE_SIZE * ATLAS_ROWS);
+
+        for (tile_index, path) in TILE_FILES.iter().enumerate() {
+            let image = ImageReader::open(path)
+                .with_context(|| format!("failed to open block texture {}", path))?
+                .decode()
+                .with_context(|| format!("failed to decode block texture {}", path))?
+                .to_rgba8();
+
+            if image.width() != TILE_SIZE || image.height() != TILE_SIZE {
+                anyhow::bail!(
+                    "block texture {} has size {}x{}, expected {}x{}",
+                    path,
+                    image.width(),
+                    image.height(),
+                    TILE_SIZE,
+                    TILE_SIZE
+                );
+            }
+
+            let tile_index = tile_index as u32;
+            let dest_x = (tile_index % ATLAS_COLUMNS) * TILE_SIZE;
+            let dest_y = (tile_index / ATLAS_COLUMNS) * TILE_SIZE;
+            atlas.copy_from(&image, dest_x, dest_y).with_context(|| {
+                format!("failed to copy block texture {} into atlas", path)
+            })?;
+        }
+
+        let texture_extent = wgpu::Extent3d {
+            width: atlas.width(),
+            height: atlas.height(),
+            depth_or_array_layers: 1,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tokenburner-block-atlas"),
+            size: texture_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            atlas.as_raw(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * atlas.width()),
+                rows_per_image: Some(atlas.height()),
+            },
+            texture_extent,
+        );
+
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tokenburner-block-atlas-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tokenburner-block-atlas-bg"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        }))
     }
 
     fn reconfigure_surface(&mut self) {
@@ -633,6 +924,51 @@ impl WgpuBackend {
 
     fn take_voxel_frame_stats(&mut self) -> VoxelFrameStats {
         mem::take(&mut self.frame_stats)
+    }
+
+    fn replace_static_model_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
+        self.static_model_meshes = self.upload_static_model_meshes(meshes);
+    }
+
+    fn replace_viewmodel_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
+        self.viewmodel_meshes = self.upload_static_model_meshes(meshes);
+    }
+
+    fn upload_static_model_meshes(
+        &self,
+        meshes: Vec<StaticModelMesh>,
+    ) -> Vec<GpuStaticModelMesh> {
+        meshes
+            .into_iter()
+            .filter(|mesh| !mesh.vertices.is_empty() && !mesh.indices.is_empty())
+            .map(|mesh| {
+                let gpu_vertices: Vec<GpuStaticModelVertex> =
+                    mesh.vertices.into_iter().map(Into::into).collect();
+
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("tokenburner-static-model-vb"),
+                            contents: bytemuck::cast_slice(&gpu_vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+
+                let index_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("tokenburner-static-model-ib"),
+                            contents: bytemuck::cast_slice(&mesh.indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+
+                GpuStaticModelMesh {
+                    _label: mesh.label,
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: mesh.indices.len() as u32,
+                }
+            })
+            .collect()
     }
 
     fn process_chunk_uploads_with_budget(&mut self) -> (usize, usize) {
@@ -802,6 +1138,7 @@ impl Backend for WgpuBackend {
 
             rpass.set_pipeline(&self.voxel_pipeline);
             rpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            rpass.set_bind_group(1, &self.block_texture_bind_group, &[]);
 
             for coord in &self.visible_chunks {
                 let Some(chunk_mesh) = self.chunk_meshes.get(coord) else {
@@ -813,6 +1150,24 @@ impl Backend for WgpuBackend {
                     .set_index_buffer(chunk_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                 drawn_chunks += 1;
+            }
+
+            rpass.set_pipeline(&self.static_model_pipeline);
+            rpass.set_bind_group(0, &self.camera_bind_group, &[]);
+
+            for mesh in &self.static_model_meshes {
+                rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
+            rpass.set_pipeline(&self.viewmodel_pipeline);
+            rpass.set_bind_group(0, &self.camera_bind_group, &[]);
+
+            for mesh in &self.viewmodel_meshes {
+                rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
         }
 

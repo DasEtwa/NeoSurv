@@ -4,6 +4,8 @@ struct CameraUniform {
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
+@group(1) @binding(0) var block_atlas: texture_2d<f32>;
+@group(1) @binding(1) var block_sampler: sampler;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -19,30 +21,15 @@ struct VsOut {
     @location(2) @interpolate(flat) material_id: u32,
 };
 
-fn material_color(material_id: u32) -> vec3<f32> {
-    switch material_id {
-        case 1u: {
-            return vec3<f32>(0.35, 0.8, 0.25); // grass
-        }
-        case 2u: {
-            return vec3<f32>(0.50, 0.35, 0.20); // dirt
-        }
-        case 3u: {
-            return vec3<f32>(0.55, 0.55, 0.60); // stone
-        }
-        case 4u: {
-            return vec3<f32>(0.82, 0.72, 0.45); // sand
-        }
-        case 5u: {
-            return vec3<f32>(0.12, 0.20, 0.85); // border wall
-        }
-        case 6u: {
-            return vec3<f32>(0.90, 0.15, 0.15); // dummy target
-        }
-        default: {
-            return vec3<f32>(0.85, 0.2, 0.85); // fallback/missing
-        }
-    }
+fn atlas_uv(material_id: u32, uv: vec2<f32>) -> vec2<f32> {
+    let atlas_columns = 4.0;
+    let atlas_rows = 2.0;
+    let tile_size = vec2<f32>(1.0 / atlas_columns, 1.0 / atlas_rows);
+    let tile = f32(material_id);
+    let tile_x = tile % atlas_columns;
+    let tile_y = floor(tile / atlas_columns);
+    let tiled_uv = fract(uv);
+    return vec2<f32>(tile_x, tile_y) * tile_size + tiled_uv * tile_size;
 }
 
 @vertex
@@ -57,9 +44,8 @@ fn vs_main(input: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
-    let base_color = material_color(input.material_id);
+    let base_color = textureSample(block_atlas, block_sampler, atlas_uv(input.material_id, input.uv)).rgb;
     let light_dir = normalize(vec3<f32>(0.35, 0.8, 0.2));
     let diffuse = max(dot(normalize(input.normal), light_dir), 0.15);
-    let checker = select(0.94, 1.0, ((u32(floor(input.uv.x * 2.0)) + u32(floor(input.uv.y * 2.0))) % 2u) == 0u);
-    return vec4<f32>(base_color * diffuse * checker, 1.0);
+    return vec4<f32>(base_color * diffuse, 1.0);
 }

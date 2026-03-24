@@ -205,6 +205,22 @@ impl FaceDir {
             Self::PosZ | Self::NegZ => IVec3::new(b, a, slice),
         }
     }
+
+    fn texture_tile(self, block: BlockType) -> u32 {
+        match block {
+            BlockType::Grass => match self {
+                Self::PosY => 0,
+                Self::NegY => 2,
+                _ => 1,
+            },
+            BlockType::Stone => 3,
+            BlockType::Sand => 4,
+            BlockType::Dirt => 2,
+            BlockType::BorderWall => 3,
+            BlockType::Dummy => 4,
+            BlockType::Air => 3,
+        }
+    }
 }
 
 const FACE_DIRS: [FaceDir; 6] = [
@@ -258,7 +274,7 @@ fn mesh_face_direction(
 
                 let neighbor =
                     block_at_with_neighbors(chunk, neighbors, local + face.neighbor_delta());
-                mask[index] = (!neighbor.is_solid()).then_some(block.material_id());
+                mask[index] = (!neighbor.is_solid()).then_some(face.texture_tile(block));
             }
         }
 
