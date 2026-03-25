@@ -52,3 +52,6 @@ Unless otherwise noted, the source code in this repository is licensed under the
 
 This repository may also contain third-party assets and materials that are licensed separately.
 See `THIRD_PARTY_NOTICES.md` for more information.
+
+<img width="1680" height="984" alt="image" src="https://github.com/user-attachments/assets/e400c4dc-bc1f-434a-bbb3-3b6b0bc52e1d" />
+
