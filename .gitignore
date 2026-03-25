@@ -1,0 +1,10 @@
+**/target/
+**/build/
+/.cargo/
+.idea/
+.vscode/
+*.swp
+*.tmp
+/TODO.md
+/CONTEXT.md
+/Neosurv/saves/
