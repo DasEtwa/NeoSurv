@@ -1,8 +1,0 @@
-/target/
-**/target/
-/build/
-.cargo/
-.idea/
-.vscode/
-*.swp
-*.tmp
