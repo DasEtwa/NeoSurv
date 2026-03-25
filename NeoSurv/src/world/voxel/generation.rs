@@ -47,7 +47,7 @@ impl TerrainGenerator {
         chunk
     }
 
-    fn surface_height(&self, world_x: i32, world_z: i32) -> i32 {
+    pub(crate) fn surface_height(&self, world_x: i32, world_z: i32) -> i32 {
         let macro_sample = self
             .macro_noise
             .get([world_x as f64 * 0.01, world_z as f64 * 0.01]);

@@ -11,14 +11,7 @@ pub(crate) struct ClearColor {
     pub(crate) a: f64,
 }
 
-impl ClearColor {
-    pub(crate) const BLACK: Self = Self {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 1.0,
-    };
-}
+impl ClearColor {}
 
 pub(crate) trait Backend {
     fn name(&self) -> &'static str;

@@ -37,6 +37,7 @@ impl ChunkCoord {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn world_from_local(self, local: LocalCoord) -> IVec3 {
         self.origin_world() + local.as_ivec3()
     }
@@ -54,6 +55,7 @@ impl LocalCoord {
         Self { x, y, z }
     }
 
+    #[cfg(test)]
     pub(crate) fn as_ivec3(self) -> IVec3 {
         IVec3::new(self.x as i32, self.y as i32, self.z as i32)
     }
@@ -100,12 +102,9 @@ impl ChunkData {
         self.blocks[index] = block;
     }
 
+    #[cfg(test)]
     pub(crate) fn fill(&mut self, block: BlockType) {
         self.blocks.fill(block);
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.blocks.iter().all(|block| !block.is_solid())
     }
 
     pub(crate) fn world_to_local(world: IVec3) -> LocalCoord {
@@ -116,15 +115,7 @@ impl ChunkData {
         }
     }
 
-    pub(crate) fn block_world(&self, world: IVec3) -> Option<BlockType> {
-        let coord = ChunkCoord::from_world(world);
-        if coord != self.coord {
-            return None;
-        }
-
-        Some(self.block(Self::world_to_local(world)))
-    }
-
+    #[cfg(test)]
     pub(crate) fn iter_solid_blocks(&self) -> impl Iterator<Item = (LocalCoord, BlockType)> + '_ {
         self.blocks
             .iter()
@@ -134,15 +125,12 @@ impl ChunkData {
             .map(|(index, block)| (Self::local_from_index(index), block))
     }
 
-    pub(crate) fn volume() -> usize {
-        CHUNK_VOLUME
-    }
-
     fn index(local: LocalCoord) -> usize {
         (local.y as usize * CHUNK_SIZE_Z as usize + local.z as usize) * CHUNK_SIZE_X as usize
             + local.x as usize
     }
 
+    #[cfg(test)]
     fn local_from_index(index: usize) -> LocalCoord {
         let x = index % CHUNK_SIZE_X as usize;
         let yz = index / CHUNK_SIZE_X as usize;

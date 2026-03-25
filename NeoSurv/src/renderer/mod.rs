@@ -121,6 +121,10 @@ impl Renderer {
         self.inner.replace_static_model_meshes(meshes);
     }
 
+    pub(crate) fn replace_dynamic_model_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
+        self.inner.replace_dynamic_model_meshes(meshes);
+    }
+
     pub(crate) fn replace_viewmodel_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
         self.inner.replace_viewmodel_meshes(meshes);
     }
@@ -221,10 +225,12 @@ struct GpuChunkMesh {
 }
 
 struct GpuStaticModelMesh {
-    _label: String,
+    label: String,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    vertex_capacity_bytes: usize,
+    index_capacity_bytes: usize,
 }
 
 #[repr(C)]
@@ -298,6 +304,7 @@ struct WgpuBackend {
     depth_view: wgpu::TextureView,
     chunk_meshes: HashMap<ChunkCoord, GpuChunkMesh>,
     static_model_meshes: Vec<GpuStaticModelMesh>,
+    dynamic_model_meshes: Vec<GpuStaticModelMesh>,
     viewmodel_meshes: Vec<GpuStaticModelMesh>,
     pending_chunk_uploads: VecDeque<ChunkUploadOp>,
     visible_chunks: HashSet<ChunkCoord>,
@@ -601,7 +608,7 @@ impl WgpuBackend {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -739,6 +746,7 @@ impl WgpuBackend {
             depth_view,
             chunk_meshes: HashMap::new(),
             static_model_meshes: Vec::new(),
+            dynamic_model_meshes: Vec::new(),
             viewmodel_meshes: Vec::new(),
             pending_chunk_uploads: VecDeque::new(),
             visible_chunks: HashSet::new(),
@@ -810,9 +818,9 @@ impl WgpuBackend {
             let tile_index = tile_index as u32;
             let dest_x = (tile_index % ATLAS_COLUMNS) * TILE_SIZE;
             let dest_y = (tile_index / ATLAS_COLUMNS) * TILE_SIZE;
-            atlas.copy_from(&image, dest_x, dest_y).with_context(|| {
-                format!("failed to copy block texture {} into atlas", path)
-            })?;
+            atlas
+                .copy_from(&image, dest_x, dest_y)
+                .with_context(|| format!("failed to copy block texture {} into atlas", path))?;
         }
 
         let texture_extent = wgpu::Extent3d {
@@ -927,48 +935,84 @@ impl WgpuBackend {
     }
 
     fn replace_static_model_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
-        self.static_model_meshes = self.upload_static_model_meshes(meshes);
+        let existing = std::mem::take(&mut self.static_model_meshes);
+        self.static_model_meshes = self.upload_static_model_meshes_reuse(existing, meshes);
+    }
+
+    fn replace_dynamic_model_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
+        let existing = std::mem::take(&mut self.dynamic_model_meshes);
+        self.dynamic_model_meshes = self.upload_static_model_meshes_reuse(existing, meshes);
     }
 
     fn replace_viewmodel_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
-        self.viewmodel_meshes = self.upload_static_model_meshes(meshes);
+        let existing = std::mem::take(&mut self.viewmodel_meshes);
+        self.viewmodel_meshes = self.upload_static_model_meshes_reuse(existing, meshes);
     }
 
-    fn upload_static_model_meshes(
+    fn upload_static_model_meshes_reuse(
         &self,
+        existing: Vec<GpuStaticModelMesh>,
         meshes: Vec<StaticModelMesh>,
     ) -> Vec<GpuStaticModelMesh> {
+        let mut existing_by_label: HashMap<String, GpuStaticModelMesh> = existing
+            .into_iter()
+            .map(|mesh| (mesh.label.clone(), mesh))
+            .collect();
+
         meshes
             .into_iter()
             .filter(|mesh| !mesh.vertices.is_empty() && !mesh.indices.is_empty())
             .map(|mesh| {
                 let gpu_vertices: Vec<GpuStaticModelVertex> =
                     mesh.vertices.into_iter().map(Into::into).collect();
+                let vertex_bytes = bytemuck::cast_slice(&gpu_vertices);
+                let index_bytes = bytemuck::cast_slice(&mesh.indices);
 
-                let vertex_buffer =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("tokenburner-static-model-vb"),
-                            contents: bytemuck::cast_slice(&gpu_vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        });
-
-                let index_buffer =
-                    self.device
-                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("tokenburner-static-model-ib"),
-                            contents: bytemuck::cast_slice(&mesh.indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        });
-
-                GpuStaticModelMesh {
-                    _label: mesh.label,
-                    vertex_buffer,
-                    index_buffer,
-                    index_count: mesh.indices.len() as u32,
+                if let Some(mut cached) = existing_by_label.remove(&mesh.label)
+                    && vertex_bytes.len() <= cached.vertex_capacity_bytes
+                    && index_bytes.len() <= cached.index_capacity_bytes
+                {
+                    self.queue.write_buffer(&cached.vertex_buffer, 0, vertex_bytes);
+                    self.queue.write_buffer(&cached.index_buffer, 0, index_bytes);
+                    cached.index_count = mesh.indices.len() as u32;
+                    return cached;
                 }
+
+                self.create_gpu_static_model_mesh(mesh.label, vertex_bytes, index_bytes)
             })
             .collect()
+    }
+
+    fn create_gpu_static_model_mesh(
+        &self,
+        label: String,
+        vertex_bytes: &[u8],
+        index_bytes: &[u8],
+    ) -> GpuStaticModelMesh {
+        let vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tokenburner-static-model-vb"),
+            size: vertex_bytes.len().max(4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&vertex_buffer, 0, vertex_bytes);
+
+        let index_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tokenburner-static-model-ib"),
+            size: index_bytes.len().max(4) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&index_buffer, 0, index_bytes);
+
+        GpuStaticModelMesh {
+            label,
+            vertex_buffer,
+            index_buffer,
+            index_count: (index_bytes.len() / mem::size_of::<u32>()) as u32,
+            vertex_capacity_bytes: vertex_bytes.len().max(4),
+            index_capacity_bytes: index_bytes.len().max(4),
+        }
     }
 
     fn process_chunk_uploads_with_budget(&mut self) -> (usize, usize) {
@@ -1156,6 +1200,12 @@ impl Backend for WgpuBackend {
             rpass.set_bind_group(0, &self.camera_bind_group, &[]);
 
             for mesh in &self.static_model_meshes {
+                rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
+            for mesh in &self.dynamic_model_meshes {
                 rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(0..mesh.index_count, 0, 0..1);

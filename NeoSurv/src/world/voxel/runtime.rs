@@ -8,7 +8,7 @@ use crate::world::voxel::{
     culling::{Aabb, Frustum},
     meshing::{ChunkMesh, ChunkNeighborSolidity},
     pipeline::{ChunkBuildResult, ChunkGenerationPipeline},
-    raycast::{RaycastHit, raycast_voxels},
+    raycast::raycast_voxels,
 };
 
 const FRUSTUM_CULL_TELEMETRY_INTERVAL_CALLS: u64 = 240;
@@ -50,8 +50,8 @@ pub(crate) struct VoxelWorld {
 
 impl VoxelWorld {
     pub(crate) fn new(seed: u32, worker_count: usize) -> Self {
-        let horizontal_radius = 2;
-        let vertical_radius = 1;
+        let horizontal_radius = 4;
+        let vertical_radius = 2;
 
         Self {
             pipeline: ChunkGenerationPipeline::new(seed, worker_count),
@@ -276,6 +276,17 @@ impl VoxelWorld {
             .filter(|block| block.is_solid())
     }
 
+    pub(crate) fn raycast_solid_distance(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+    ) -> Option<f32> {
+        raycast_voxels(origin, direction, max_distance, |world| self.block_at_world(world))
+            .map(|hit| hit.distance)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn set_block_world(&mut self, world: IVec3, block: BlockType) -> bool {
         let (chunk_coord, local) = split_world_position(world);
 
@@ -296,27 +307,9 @@ impl VoxelWorld {
         true
     }
 
-    pub(crate) fn raycast(
-        &self,
-        origin: Vec3,
-        direction: Vec3,
-        max_distance: f32,
-    ) -> Option<RaycastHit> {
-        raycast_voxels(origin, direction, max_distance, |pos| {
-            self.block_at_world(pos)
-        })
-    }
-
+    #[cfg(test)]
     pub(crate) fn loaded_chunk_count(&self) -> usize {
         self.chunks.len()
-    }
-
-    pub(crate) fn pending_chunk_count(&self) -> usize {
-        self.pending.len()
-    }
-
-    pub(crate) fn mesh_for_chunk(&self, coord: ChunkCoord) -> Option<&ChunkMesh> {
-        self.meshes.get(&coord)
     }
 
     fn chunk_distance_sq(coord: ChunkCoord, center: ChunkCoord) -> i64 {

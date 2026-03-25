@@ -135,10 +135,6 @@ impl ChunkGenerationPipeline {
         }
     }
 
-    pub(crate) fn request_chunk(&self, coord: ChunkCoord) -> bool {
-        self.request_generate_chunk(coord, ChunkNeighborSolidity::default())
-    }
-
     pub(crate) fn request_generate_chunk(
         &self,
         coord: ChunkCoord,

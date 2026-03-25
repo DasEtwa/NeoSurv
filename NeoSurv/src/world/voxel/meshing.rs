@@ -216,8 +216,6 @@ impl FaceDir {
             BlockType::Stone => 3,
             BlockType::Sand => 4,
             BlockType::Dirt => 2,
-            BlockType::BorderWall => 3,
-            BlockType::Dummy => 4,
             BlockType::Air => 3,
         }
     }
@@ -232,6 +230,7 @@ const FACE_DIRS: [FaceDir; 6] = [
     FaceDir::NegZ,
 ];
 
+#[cfg(test)]
 pub(crate) fn build_chunk_mesh(chunk: &ChunkData) -> ChunkMesh {
     build_chunk_mesh_with_neighbors(chunk, &ChunkNeighborSolidity::default())
 }

@@ -1,6 +1,7 @@
 /target/
 **/target/
 /build/
+/saves/
 .cargo/
 .idea/
 .vscode/

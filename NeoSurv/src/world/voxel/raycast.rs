@@ -137,7 +137,9 @@ mod tests {
         )
         .expect("ray should hit");
 
+        assert_eq!(hit.block, BlockType::Stone);
         assert_eq!(hit.block_pos, IVec3::new(3, 0, 0));
+        assert_eq!(hit.previous_pos, IVec3::new(2, 0, 0));
         assert!(hit.distance <= 3.0);
     }
 

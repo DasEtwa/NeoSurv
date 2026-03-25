@@ -1,4 +1,5 @@
 use glam::{IVec3, Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::{
@@ -21,6 +22,13 @@ const PLAYER_TORSO_PROBE_FROM_EYE: f32 = 0.8;
 const PLAYER_FEET_CLEARANCE_PROBE: f32 = 0.05;
 const PLAYER_SPRINT_MULTIPLIER: f32 = 1.6;
 const PLAYER_CROUCH_SPEED_MULTIPLIER: f32 = 0.45;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct SavedPlayerPose {
+    pub(crate) position: [f32; 3],
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct Player {
@@ -75,10 +83,6 @@ impl Player {
         self.camera.forward()
     }
 
-    pub(crate) fn right(&self) -> Vec3 {
-        self.camera.right()
-    }
-
     pub(crate) fn view_matrix(&self) -> glam::Mat4 {
         self.camera.view_matrix()
     }
@@ -95,8 +99,22 @@ impl Player {
         }
     }
 
-    pub(crate) fn is_spawn_aligned_to_world(&self) -> bool {
-        self.spawn_aligned_to_world
+    pub(crate) fn saved_pose(&self) -> SavedPlayerPose {
+        SavedPlayerPose {
+            position: self.camera.position.to_array(),
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+        }
+    }
+
+    pub(crate) fn restore_saved_pose(&mut self, pose: SavedPlayerPose) {
+        self.camera.position = Vec3::from_array(pose.position);
+        self.camera.yaw = pose.yaw;
+        self.camera.pitch = pose.pitch;
+        self.spawn_aligned_to_world = true;
+        self.vertical_velocity = 0.0;
+        self.is_grounded = false;
+        self.is_crouching = false;
     }
 
     pub(crate) fn update_look_and_move<F>(
