@@ -564,9 +564,15 @@ impl EngineApp {
                     find_surface_height_in_world(&self.voxel_world, x, z)
                 });
             self.runtime_state
-                .tick_enemy_ai(dt_seconds, self.player.position(), |x, z| {
-                    find_surface_height_in_world(&self.voxel_world, x, z)
-                });
+                .tick_enemy_ai(
+                    dt_seconds,
+                    self.player.position(),
+                    |x, z| find_surface_height_in_world(&self.voxel_world, x, z),
+                    |world| {
+                        self.voxel_world.block_at_world(world).is_some()
+                            || static_prop_bounds_block_cell(&static_prop_bounds, world)
+                    },
+                );
         }
         self.combat
             .tick_projectiles(

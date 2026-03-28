@@ -160,7 +160,7 @@ What was fixed:
 
 ### 8. Enemy AI ignores proper navigation
 
-Status: open
+Status: fixed
 
 Symptoms:
 
@@ -170,6 +170,12 @@ Symptoms:
 Likely areas:
 
 - `src/gameplay/enemies.rs`
+
+What was fixed:
+
+- melee attacks now require clear line of sight instead of damaging the player blindly through blocked space
+- chase/return/wander movement now probes forward candidates and sidesteps around blocked cells instead of always running straight into walls/props
+- regression tests now cover both blocked melee line of sight and obstacle-aware chase steering
 
 ## Medium
 
@@ -236,6 +242,11 @@ Likely areas:
 
 - player movement and gravity checks now treat structure/chest volumes as solid blockers alongside voxel terrain
 - projectile updates now collide with static prop volumes instead of only voxel blocks
+
+### Fixed: enemy AI now respects blocked melee lines and basic obstacle steering
+
+- melee enemies no longer attack through blocked space when line of sight is obstructed
+- chase and return movement now choose sidestep candidates when the direct forward cell is blocked
 
 ### Fixed: chunk upload queue could not deduplicate or prioritize visible chunks
 

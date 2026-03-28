@@ -588,13 +588,15 @@ impl WorldRuntimeState {
         }
     }
 
-    pub(crate) fn tick_enemy_ai<F>(
+    pub(crate) fn tick_enemy_ai<F, G>(
         &mut self,
         dt_seconds: f32,
         player_position: Vec3,
         find_surface_height: F,
+        is_walk_blocked: G,
     ) where
         F: FnMut(i32, i32) -> Option<i32>,
+        G: FnMut(IVec3) -> bool,
     {
         let Some(local_player_index) = self
             .players
@@ -609,6 +611,7 @@ impl WorldRuntimeState {
             player_position,
             player_runtime,
             find_surface_height,
+            is_walk_blocked,
         );
     }
 
