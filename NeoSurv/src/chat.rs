@@ -10,7 +10,7 @@ use crate::{
 
 const MAX_CHAT_LINES: usize = 6;
 const CHAT_LINE_SCALE: f32 = 0.0085;
-const CHAT_PANEL_OFFSET: Vec3 = Vec3::new(0.0, 0.0, 1.56);
+const CHAT_PANEL_OFFSET: Vec3 = Vec3::new(0.0, 0.0, 1.60);
 
 #[derive(Debug, Clone)]
 struct ChatLine {
@@ -114,34 +114,47 @@ impl ChatState {
 
         let mut meshes = Vec::new();
         let visible_lines = if self.open { 5 } else { 3 };
-        let panel_height = if self.open { 0.26 } else { 0.18 };
-        let line_step = if self.open { 0.048 } else { 0.042 };
+        let panel_height = if self.open { 0.30 } else { 0.21 };
+        let line_step = if self.open { 0.050 } else { 0.044 };
 
         meshes.push(build_box_mesh(
-            "chat-panel-shell",
-            Vec3::new(-0.98, -0.28, -0.03),
-            Vec3::new(-0.40, -0.28 + panel_height, 0.03),
-            [0.05, 0.06, 0.08, 0.16],
+            "chat-panel-shadow",
+            Vec3::new(-0.99, -0.31, -0.04),
+            Vec3::new(-0.33, -0.31 + panel_height, 0.04),
+            [0.01, 0.01, 0.02, 0.12],
         ));
         meshes.push(build_box_mesh(
-            "chat-panel-accent",
-            Vec3::new(-0.98, -0.28 + panel_height - 0.02, -0.02),
-            Vec3::new(-0.40, -0.28 + panel_height, 0.02),
-            [0.72, 0.74, 0.80, 0.06],
+            "chat-panel-shell",
+            Vec3::new(-0.96, -0.28, -0.03),
+            Vec3::new(-0.36, -0.28 + panel_height, 0.03),
+            [0.05, 0.06, 0.08, 0.20],
+        ));
+        meshes.push(build_box_mesh(
+            "chat-panel-rail",
+            Vec3::new(-0.96, -0.28 + panel_height - 0.025, -0.01),
+            Vec3::new(-0.36, -0.28 + panel_height, 0.01),
+            [0.72, 0.74, 0.80, 0.10],
+        ));
+        meshes.push(build_text_mesh(
+            "chat-panel-tag",
+            "COMMS",
+            Vec3::new(-0.92, -0.28 + panel_height - 0.055, 0.02),
+            0.0075,
+            [0.96, 0.90, 0.78, 0.78],
         ));
 
         for (index, line) in self.lines.iter().rev().take(visible_lines).enumerate() {
             let y = -0.06 - index as f32 * line_step;
             let color = if line.is_system {
-                [0.98, 0.94, 0.78, 0.90]
+                [0.98, 0.94, 0.78, 0.92]
             } else {
-                [0.84, 0.92, 1.0, 0.90]
+                [0.84, 0.92, 1.0, 0.92]
             };
 
             meshes.push(build_text_mesh(
                 format!("chat-line-{index}"),
                 &sanitize_text(&line.text),
-                Vec3::new(-0.95, y, 0.02),
+                Vec3::new(-0.92, y, 0.02),
                 CHAT_LINE_SCALE,
                 color,
             ));
@@ -149,20 +162,27 @@ impl ChatState {
 
         if self.open {
             let prompt = format!("> {}", self.input);
-            let prompt_width = text_width(&sanitize_text(&prompt), CHAT_LINE_SCALE);
-            let input_left = -0.95;
-            let input_right = (input_left + prompt_width + 0.04).min(-0.44);
+            let prompt_text = sanitize_text(&prompt);
+            let prompt_width = text_width(&prompt_text, CHAT_LINE_SCALE);
+            let input_left = -0.92;
+            let input_right = (input_left + prompt_width + 0.06).min(-0.40);
 
             meshes.push(build_box_mesh(
                 "chat-input-shell",
                 Vec3::new(input_left, -0.26, -0.02),
-                Vec3::new(input_right, -0.18, 0.02),
-                [0.12, 0.10, 0.08, 0.22],
+                Vec3::new(input_right, -0.17, 0.02),
+                [0.10, 0.09, 0.08, 0.24],
+            ));
+            meshes.push(build_box_mesh(
+                "chat-input-rail",
+                Vec3::new(input_left, -0.19, -0.01),
+                Vec3::new(input_right, -0.17, 0.01),
+                [0.92, 0.74, 0.42, 0.16],
             ));
             meshes.push(build_text_mesh(
                 "chat-input-text",
-                &sanitize_text(&prompt),
-                Vec3::new(-0.94, -0.21, 0.02),
+                &prompt_text,
+                Vec3::new(-0.90, -0.205, 0.02),
                 CHAT_LINE_SCALE,
                 [1.0, 0.98, 0.92, 0.96],
             ));
@@ -179,18 +199,16 @@ impl ChatState {
         let mut instances = Vec::new();
         let visible_lines = if self.open { 5 } else { 3 };
 
+        instances.push(overlay_instance("chat-panel-shadow", camera, CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, -0.03)));
         instances.push(overlay_instance("chat-panel-shell", camera, CHAT_PANEL_OFFSET));
-        instances.push(overlay_instance(
-            "chat-panel-accent",
-            camera,
-            CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, -0.01),
-        ));
+        instances.push(overlay_instance("chat-panel-rail", camera, CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, 0.01)));
+        instances.push(overlay_instance("chat-panel-tag", camera, CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, 0.02)));
 
         for index in 0..self.lines.len().min(visible_lines) {
             instances.push(overlay_instance(
                 format!("chat-line-{index}"),
                 camera,
-                CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, -0.02),
+                CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, 0.02),
             ));
         }
 
@@ -201,9 +219,14 @@ impl ChatState {
                 CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, 0.01),
             ));
             instances.push(overlay_instance(
-                "chat-input-text",
+                "chat-input-rail",
                 camera,
                 CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, 0.015),
+            ));
+            instances.push(overlay_instance(
+                "chat-input-text",
+                camera,
+                CHAT_PANEL_OFFSET + Vec3::new(0.0, 0.0, 0.02),
             ));
         }
 

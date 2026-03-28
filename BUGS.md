@@ -217,7 +217,7 @@ What was fixed:
 
 ### 11. UI quality is not production-ready
 
-Status: open
+Status: fixed
 
 Symptoms:
 
@@ -230,6 +230,12 @@ Likely areas:
 - `src/menu.rs`
 - `src/chat.rs`
 - `src/ui.rs`
+
+What was fixed:
+
+- HUD, menu, and chat now use layered panels, cleaner framing, and stronger typography so the interface no longer reads like a temporary debug overlay
+- the HUD was rebuilt into a dock-style layout with clearer health/time presentation and more deliberate hotbar slot treatment
+- pause menu and chat overlay now share the same more polished visual language, including depth layers, accent rails, and cleaner input/readability treatment
 
 ## Recently Fixed
 
@@ -267,6 +273,11 @@ Likely areas:
 ### Fixed: debug chest spawns now snap to sampled terrain height
 
 - `/spawn chest` uses the current terrain height lookup so spawned chests no longer float or clip from unsnapped debug placement
+
+### Fixed: HUD, menu, and chat presentation now look intentionally styled
+
+- HUD now uses a docked layered layout with cleaner health/time chips and less placeholder-looking slot treatment
+- menu and chat overlays now use matching framed panels with clearer hierarchy and less debug-like presentation
 
 ### Fixed: chunk upload queue could not deduplicate or prioritize visible chunks
 

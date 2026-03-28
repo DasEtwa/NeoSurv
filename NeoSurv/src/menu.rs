@@ -50,153 +50,199 @@ impl StartMenuState {
         let mut meshes = Vec::new();
         let world_name = sanitize_menu_text(world_name);
         let title = "TOKENBURNER";
+        let subtitle = "SURVIVAL PROTOTYPE";
 
         meshes.push(build_box_mesh(
-            "menu-shell",
-            Vec3::new(-0.46, -0.30, -0.03),
-            Vec3::new(0.46, 0.34, 0.03),
-            [0.05, 0.06, 0.08, 0.18],
+            "menu-shell-shadow",
+            Vec3::new(-0.54, -0.42, -0.04),
+            Vec3::new(0.56, 0.42, 0.04),
+            [0.01, 0.01, 0.02, 0.12],
         ));
         meshes.push(build_box_mesh(
-            "menu-shell-accent",
-            Vec3::new(-0.46, 0.30, -0.02),
-            Vec3::new(0.46, 0.34, 0.02),
-            [0.94, 0.82, 0.50, 0.10],
+            "menu-shell",
+            Vec3::new(-0.50, -0.38, -0.03),
+            Vec3::new(0.52, 0.38, 0.03),
+            [0.05, 0.06, 0.08, 0.22],
+        ));
+        meshes.push(build_box_mesh(
+            "menu-shell-rail",
+            Vec3::new(-0.50, 0.32, -0.01),
+            Vec3::new(0.52, 0.38, 0.01),
+            [0.94, 0.82, 0.50, 0.16],
+        ));
+        meshes.push(build_box_mesh(
+            "menu-side-bar",
+            Vec3::new(-0.50, -0.38, -0.01),
+            Vec3::new(-0.42, 0.38, 0.01),
+            [0.12, 0.11, 0.10, 0.22],
         ));
 
         meshes.push(build_text_mesh(
             "menu-title",
             title,
-            Vec3::new(-text_width(title, 0.013) * 0.5, 0.255, 0.02),
-            0.013,
-            [0.98, 0.96, 0.86, 0.96],
+            Vec3::new(-text_width(title, 0.014) * 0.5, 0.255, 0.02),
+            0.014,
+            [0.98, 0.96, 0.86, 0.98],
+        ));
+        meshes.push(build_text_mesh(
+            "menu-subtitle",
+            subtitle,
+            Vec3::new(-text_width(subtitle, 0.0065) * 0.5, 0.205, 0.02),
+            0.0065,
+            [0.84, 0.88, 0.94, 0.70],
         ));
 
         meshes.push(build_box_mesh(
             "menu-world-row",
-            Vec3::new(-0.34, 0.10, -0.02),
-            Vec3::new(0.34, 0.18, 0.02),
-            [0.10, 0.10, 0.12, 0.16],
+            Vec3::new(-0.32, 0.08, -0.02),
+            Vec3::new(0.36, 0.18, 0.02),
+            [0.08, 0.09, 0.11, 0.20],
+        ));
+        meshes.push(build_box_mesh(
+            "menu-world-row-rail",
+            Vec3::new(-0.32, 0.15, -0.01),
+            Vec3::new(0.36, 0.18, 0.01),
+            [0.56, 0.74, 0.96, 0.18],
         ));
         meshes.push(build_text_mesh(
             "menu-world-label",
             "WORLD",
-            Vec3::new(-0.30, 0.155, 0.02),
+            Vec3::new(-0.28, 0.145, 0.02),
             0.0085,
             [0.82, 0.86, 0.92, 0.84],
         ));
         meshes.push(build_text_mesh(
             "menu-world-name",
             &world_name,
-            Vec3::new(-text_width(&world_name, 0.010) * 0.5, 0.118, 0.02),
-            0.010,
-            [0.98, 0.98, 0.92, 0.92],
+            Vec3::new(-text_width(&world_name, 0.0105) * 0.5, 0.112, 0.02),
+            0.0105,
+            [0.98, 0.98, 0.92, 0.94],
         ));
         meshes.push(build_text_mesh(
             "menu-world-nav-left",
             "<",
-            Vec3::new(-0.34, 0.118, 0.02),
+            Vec3::new(-0.29, 0.112, 0.02),
             0.010,
-            [0.96, 0.82, 0.48, 0.80],
+            [0.96, 0.82, 0.48, 0.84],
         ));
         meshes.push(build_text_mesh(
             "menu-world-nav-right",
             ">",
-            Vec3::new(0.31, 0.118, 0.02),
+            Vec3::new(0.32, 0.112, 0.02),
             0.010,
-            [0.96, 0.82, 0.48, 0.80],
+            [0.96, 0.82, 0.48, 0.84],
         ));
 
         for (index, (label, local_y)) in [
-            ("PLAY", -0.02),
-            ("NEW WORLD", -0.12),
-            ("SAVE WORLD", -0.22),
-            ("QUIT", -0.32),
+            ("PLAY", -0.01),
+            ("NEW WORLD", -0.11),
+            ("SAVE WORLD", -0.21),
+            ("QUIT", -0.31),
         ]
         .into_iter()
         .enumerate()
         {
             let is_selected = self.selected_button == index;
             let panel_color = if is_selected {
-                [0.22, 0.18, 0.14, 0.34]
+                [0.16, 0.14, 0.12, 0.38]
             } else {
-                [0.08, 0.09, 0.10, 0.18]
+                [0.07, 0.08, 0.10, 0.20]
             };
-            let accent_color = if is_selected {
-                [0.94, 0.82, 0.50, 0.60]
+            let rail_color = if is_selected {
+                [0.98, 0.86, 0.62, 0.72]
             } else {
-                [0.92, 0.92, 0.96, 0.18]
+                [0.92, 0.92, 0.96, 0.12]
             };
             let text_color = if is_selected {
                 [1.0, 0.98, 0.88, 0.98]
             } else {
-                [0.88, 0.90, 0.94, 0.82]
+                [0.88, 0.90, 0.94, 0.84]
             };
 
             meshes.push(build_box_mesh(
                 format!("menu-button-{index}"),
-                Vec3::new(-0.34, local_y - 0.042, -0.02),
+                Vec3::new(-0.28, local_y - 0.045, -0.02),
                 Vec3::new(0.34, local_y + 0.028, 0.02),
                 panel_color,
             ));
             meshes.push(build_box_mesh(
-                format!("menu-button-{index}-accent"),
-                Vec3::new(-0.34, local_y - 0.042, -0.01),
-                Vec3::new(-0.29, local_y + 0.028, 0.01),
-                accent_color,
+                format!("menu-button-{index}-rail"),
+                Vec3::new(-0.28, local_y - 0.045, -0.01),
+                Vec3::new(-0.22, local_y + 0.028, 0.01),
+                rail_color,
+            ));
+            meshes.push(build_box_mesh(
+                format!("menu-button-{index}-marker"),
+                Vec3::new(-0.20, local_y - 0.010, -0.008),
+                Vec3::new(-0.17, local_y + 0.005, 0.008),
+                if is_selected {
+                    [0.98, 0.92, 0.74, 0.90]
+                } else {
+                    [0.30, 0.32, 0.36, 0.20]
+                },
             ));
             meshes.push(build_text_mesh(
                 format!("menu-button-{index}-text"),
                 label,
-                Vec3::new(-text_width(label, 0.011) * 0.5, local_y, 0.02),
-                0.011,
+                Vec3::new(-text_width(label, 0.0115) * 0.5 + 0.04, local_y, 0.02),
+                0.0115,
                 text_color,
             ));
         }
 
-        let footer = "W/S SELECT  A/D WORLD  ENTER USE";
+        let footer = "W/S SELECT   A/D WORLD   ENTER CONFIRM";
         meshes.push(build_text_mesh(
             "menu-footer",
             footer,
-            Vec3::new(-text_width(footer, 0.0075) * 0.5, -0.38, 0.02),
+            Vec3::new(-text_width(footer, 0.0075) * 0.5, -0.40, 0.02),
             0.0075,
-            [0.84, 0.88, 0.94, 0.62],
+            [0.84, 0.88, 0.94, 0.66],
         ));
 
         meshes
     }
 
     pub(crate) fn build_instances(&self, camera: &Camera) -> Vec<MeshInstance> {
+        let base = Vec3::new(0.0, 0.02, 2.30);
         let mut instances = vec![
-            overlay_instance("menu-shell", camera, Vec3::new(0.0, 0.02, 2.32)),
-            overlay_instance("menu-shell-accent", camera, Vec3::new(0.0, 0.02, 2.31)),
-            overlay_instance("menu-title", camera, Vec3::new(0.0, 0.02, 2.30)),
-            overlay_instance("menu-world-row", camera, Vec3::new(0.0, 0.02, 2.29)),
-            overlay_instance("menu-world-label", camera, Vec3::new(0.0, 0.02, 2.28)),
-            overlay_instance("menu-world-name", camera, Vec3::new(0.0, 0.02, 2.28)),
-            overlay_instance("menu-world-nav-left", camera, Vec3::new(0.0, 0.02, 2.28)),
-            overlay_instance("menu-world-nav-right", camera, Vec3::new(0.0, 0.02, 2.28)),
+            overlay_instance("menu-shell-shadow", camera, base + Vec3::new(0.0, 0.0, -0.03)),
+            overlay_instance("menu-shell", camera, base),
+            overlay_instance("menu-shell-rail", camera, base + Vec3::new(0.0, 0.0, 0.01)),
+            overlay_instance("menu-side-bar", camera, base + Vec3::new(0.0, 0.0, 0.01)),
+            overlay_instance("menu-title", camera, base + Vec3::new(0.0, 0.0, 0.02)),
+            overlay_instance("menu-subtitle", camera, base + Vec3::new(0.0, 0.0, 0.02)),
+            overlay_instance("menu-world-row", camera, base),
+            overlay_instance("menu-world-row-rail", camera, base + Vec3::new(0.0, 0.0, 0.01)),
+            overlay_instance("menu-world-label", camera, base + Vec3::new(0.0, 0.0, 0.02)),
+            overlay_instance("menu-world-name", camera, base + Vec3::new(0.0, 0.0, 0.02)),
+            overlay_instance("menu-world-nav-left", camera, base + Vec3::new(0.0, 0.0, 0.02)),
+            overlay_instance("menu-world-nav-right", camera, base + Vec3::new(0.0, 0.0, 0.02)),
         ];
 
         for index in 0..MENU_BUTTON_COUNT {
             instances.push(overlay_instance(
                 format!("menu-button-{index}"),
                 camera,
-                Vec3::new(0.0, 0.02, 2.27),
+                base,
             ));
             instances.push(overlay_instance(
-                format!("menu-button-{index}-accent"),
+                format!("menu-button-{index}-rail"),
                 camera,
-                Vec3::new(0.0, 0.02, 2.26),
+                base + Vec3::new(0.0, 0.0, 0.01),
+            ));
+            instances.push(overlay_instance(
+                format!("menu-button-{index}-marker"),
+                camera,
+                base + Vec3::new(0.0, 0.0, 0.015),
             ));
             instances.push(overlay_instance(
                 format!("menu-button-{index}-text"),
                 camera,
-                Vec3::new(0.0, 0.02, 2.25),
+                base + Vec3::new(0.0, 0.0, 0.02),
             ));
         }
 
-        instances.push(overlay_instance("menu-footer", camera, Vec3::new(0.0, 0.02, 2.24)));
+        instances.push(overlay_instance("menu-footer", camera, base + Vec3::new(0.0, 0.0, 0.02)));
         instances
     }
 }
