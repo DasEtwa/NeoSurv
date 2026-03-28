@@ -5,6 +5,13 @@ struct CameraUniform {
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
+struct ModelUniform {
+    model: mat4x4<f32>,
+    tint: vec4<f32>,
+};
+
+@group(1) @binding(0) var<uniform> model: ModelUniform;
+
 struct VsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -22,10 +29,11 @@ struct VsOut {
 @vertex
 fn vs_main(input: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip_position = camera.projection * camera.view * vec4<f32>(input.position, 1.0);
-    out.normal = normalize(input.normal);
+    let world_position = model.model * vec4<f32>(input.position, 1.0);
+    out.clip_position = camera.projection * camera.view * world_position;
+    out.normal = normalize((model.model * vec4<f32>(input.normal, 0.0)).xyz);
     out.uv = input.uv;
-    out.color = input.color;
+    out.color = input.color * model.tint;
     return out;
 }
 

@@ -13,6 +13,9 @@ const WORLD_RUNTIME_VERSION: u32 = 1;
 const LOCAL_PLAYER_ID: u64 = 1;
 const PLAYER_MAX_HEALTH: i32 = 100;
 const DAY_NIGHT_CYCLE_SECONDS: f32 = 30.0 * 60.0;
+const SPAWNER_MIN_PLAYER_DISTANCE: f32 = 6.0;
+const SPAWNER_MIN_ENEMY_DISTANCE: f32 = 1.8;
+const SPAWNER_COLLISION_RADIUS: f32 = 0.45;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct TimeOfDayState {
@@ -485,6 +488,31 @@ impl WorldRuntimeState {
         best_distance
     }
 
+    pub(crate) fn static_prop_bounds(&self) -> Vec<(Vec3, Vec3)> {
+        let mut bounds = Vec::with_capacity(self.structures.len() * 5 + self.chests.len());
+        for structure in &self.structures {
+            bounds.extend(structure_occluder_bounds(structure));
+        }
+        for chest in &self.chests {
+            bounds.push(chest_bounds(chest));
+        }
+        bounds
+    }
+
+    pub(crate) fn is_static_prop_cell_solid(&self, world: IVec3) -> bool {
+        let cell_min = world.as_vec3();
+        let cell_max = cell_min + Vec3::ONE;
+        self.static_prop_bounds()
+            .into_iter()
+            .any(|(min, max)| aabb_intersects_aabb(cell_min, cell_max, min, max))
+    }
+
+    pub(crate) fn static_prop_intersects_sphere(&self, center: Vec3, radius: f32) -> bool {
+        self.static_prop_bounds()
+            .into_iter()
+            .any(|(min, max)| sphere_intersects_aabb(center, radius, min, max))
+    }
+
     pub(crate) fn spawn_debug_chest(&mut self, position: IVec3, tier: ChestTier) -> u64 {
         let id = self.alloc_id();
         self.chests.push(ChestState {
@@ -513,6 +541,13 @@ impl WorldRuntimeState {
             .iter()
             .map(|enemy| enemy.id)
             .collect();
+        let mut enemy_positions: Vec<Vec3> = self
+            .enemies
+            .enemies()
+            .iter()
+            .map(|enemy| Vec3::from_array(enemy.position))
+            .collect();
+        let static_prop_bounds = self.static_prop_bounds();
         let mut pending_spawns = Vec::new();
         let mut next_runtime_id = self.next_runtime_id;
 
@@ -539,19 +574,20 @@ impl WorldRuntimeState {
 
             let spawn_id = next_runtime_id;
             next_runtime_id = next_runtime_id.saturating_add(1);
-            let spawn_position = {
-                let mut position = spawner_position;
-                position.x += (spawn_id % 3) as f32 - 1.0;
-                position.z += ((spawn_id / 3) % 3) as f32 - 1.0;
-                if let Some(surface) =
-                    find_surface_height(position.x.round() as i32, position.z.round() as i32)
-                {
-                    position.y = surface as f32 + 1.0;
-                }
-                position
+            let Some(spawn_position) = find_valid_spawn_position(
+                spawner_position,
+                spawn_id,
+                player_position,
+                &enemy_positions,
+                &static_prop_bounds,
+                &mut find_surface_height,
+            ) else {
+                spawner.cooldown_remaining = (spawner.base_cooldown * 0.35).max(1.0);
+                continue;
             };
 
             pending_spawns.push((spawner.id, spawn_id, spawn_position));
+            enemy_positions.push(spawn_position);
             spawner.active_enemy_ids.push(spawn_id);
             spawner.cooldown_remaining = spawner.base_cooldown;
         }
@@ -563,13 +599,15 @@ impl WorldRuntimeState {
         }
     }
 
-    pub(crate) fn tick_enemy_ai<F>(
+    pub(crate) fn tick_enemy_ai<F, G>(
         &mut self,
         dt_seconds: f32,
         player_position: Vec3,
         find_surface_height: F,
+        is_walk_blocked: G,
     ) where
         F: FnMut(i32, i32) -> Option<i32>,
+        G: FnMut(IVec3) -> bool,
     {
         let Some(local_player_index) = self
             .players
@@ -584,6 +622,7 @@ impl WorldRuntimeState {
             player_position,
             player_runtime,
             find_surface_height,
+            is_walk_blocked,
         );
     }
 
@@ -720,6 +759,71 @@ fn structure_socket_offset(index: usize, chest: bool) -> IVec3 {
     offsets[index % offsets.len()]
 }
 
+fn spawn_candidate_offsets(spawn_id: u64) -> Vec<IVec3> {
+    let seed = (spawn_id % 8) as usize;
+    let base = [
+        IVec3::new(1, 0, 0),
+        IVec3::new(1, 0, 1),
+        IVec3::new(0, 0, 1),
+        IVec3::new(-1, 0, 1),
+        IVec3::new(-1, 0, 0),
+        IVec3::new(-1, 0, -1),
+        IVec3::new(0, 0, -1),
+        IVec3::new(1, 0, -1),
+    ];
+    let mut offsets = Vec::with_capacity(base.len() * 6);
+    for radius in 1..=6 {
+        for index in 0..base.len() {
+            offsets.push(base[(index + seed) % base.len()] * radius);
+        }
+    }
+    offsets
+}
+
+fn find_valid_spawn_position<F>(
+    spawner_position: Vec3,
+    spawn_id: u64,
+    player_position: Vec3,
+    enemy_positions: &[Vec3],
+    static_prop_bounds: &[(Vec3, Vec3)],
+    find_surface_height: &mut F,
+) -> Option<Vec3>
+where
+    F: FnMut(i32, i32) -> Option<i32>,
+{
+    for offset in spawn_candidate_offsets(spawn_id) {
+        let candidate_x = (spawner_position.x.round() as i32) + offset.x;
+        let candidate_z = (spawner_position.z.round() as i32) + offset.z;
+        let Some(surface) = find_surface_height(candidate_x, candidate_z) else {
+            continue;
+        };
+
+        let candidate = Vec3::new(candidate_x as f32 + 0.5, surface as f32 + 1.0, candidate_z as f32 + 0.5);
+        if candidate.distance(player_position) < SPAWNER_MIN_PLAYER_DISTANCE {
+            continue;
+        }
+        if enemy_positions
+            .iter()
+            .any(|position| position.distance(candidate) < SPAWNER_MIN_ENEMY_DISTANCE)
+        {
+            continue;
+        }
+        if static_prop_bounds_hit_sphere(static_prop_bounds, candidate, SPAWNER_COLLISION_RADIUS) {
+            continue;
+        }
+
+        return Some(candidate);
+    }
+
+    None
+}
+
+fn static_prop_bounds_hit_sphere(bounds: &[(Vec3, Vec3)], center: Vec3, radius: f32) -> bool {
+    bounds
+        .iter()
+        .any(|(min, max)| sphere_intersects_aabb(center, radius, *min, *max))
+}
+
 fn structure_occluder_bounds(structure: &StructureInstance) -> Vec<(Vec3, Vec3)> {
     let base = Vec3::new(
         structure.position[0] as f32 + 0.5,
@@ -850,6 +954,20 @@ fn ray_aabb_distance(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Opt
     }
 }
 
+fn aabb_intersects_aabb(min_a: Vec3, max_a: Vec3, min_b: Vec3, max_b: Vec3) -> bool {
+    min_a.x < max_b.x
+        && max_a.x > min_b.x
+        && min_a.y < max_b.y
+        && max_a.y > min_b.y
+        && min_a.z < max_b.z
+        && max_a.z > min_b.z
+}
+
+fn sphere_intersects_aabb(center: Vec3, radius: f32, min: Vec3, max: Vec3) -> bool {
+    let closest = center.clamp(min, max);
+    center.distance_squared(closest) <= radius * radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +986,49 @@ mod tests {
         time.advance(DAY_NIGHT_CYCLE_SECONDS + 10.0);
         assert_eq!(time.elapsed_days, 1);
         assert!(time.normalized_time > 0.0);
+    }
+
+    #[test]
+    fn structures_block_cell_collision_queries() {
+        let state = WorldRuntimeState::new_singleplayer(42);
+        let structure = state.structures.first().expect("expected generated structure");
+        let world = IVec3::new(
+            structure.position[0],
+            structure.position[1] + 1,
+            structure.position[2],
+        );
+
+        assert!(state.is_static_prop_cell_solid(world));
+    }
+
+    #[test]
+    fn static_props_block_sphere_collision_queries() {
+        let state = WorldRuntimeState::new_singleplayer(42);
+        let chest = state.chests.first().expect("expected generated chest");
+        let center = Vec3::new(
+            chest.position[0] as f32 + 0.5,
+            chest.position[1] as f32 + 0.5,
+            chest.position[2] as f32 + 0.5,
+        );
+
+        assert!(state.static_prop_intersects_sphere(center, 0.2));
+    }
+
+    #[test]
+    fn spawn_validation_skips_positions_too_close_to_player_or_props() {
+        let player = Vec3::new(1.5, 1.0, 0.5);
+        let bounds = vec![(Vec3::new(0.0, 0.0, 1.0), Vec3::new(2.0, 3.0, 2.0))];
+        let spawn = find_valid_spawn_position(
+            Vec3::new(0.5, 1.0, 0.5),
+            0,
+            player,
+            &[],
+            &bounds,
+            &mut |_, _| Some(0),
+        )
+        .expect("expected validated spawn candidate");
+
+        assert!(spawn.distance(player) >= SPAWNER_MIN_PLAYER_DISTANCE);
+        assert!(!static_prop_bounds_hit_sphere(&bounds, spawn, SPAWNER_COLLISION_RADIUS));
     }
 }

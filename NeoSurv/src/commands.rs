@@ -11,12 +11,14 @@ pub(crate) struct CommandOutcome {
     pub(crate) lines: Vec<String>,
     pub(crate) save_requested: bool,
     pub(crate) load_requested: bool,
+    pub(crate) world_changed: bool,
 }
 
 pub(crate) struct CommandContext<'a> {
     pub(crate) world: &'a mut WorldRuntimeState,
     pub(crate) player_position: Vec3,
     pub(crate) player_forward: Vec3,
+    pub(crate) find_surface_height: &'a mut dyn FnMut(i32, i32) -> Option<i32>,
 }
 
 #[derive(Debug, Default)]
@@ -52,6 +54,7 @@ impl CommandRegistry {
                 ctx.world.time_of_day.set_normalized_time(0.20);
                 CommandOutcome {
                     lines: vec!["TIME SET TO DAY".to_string()],
+                    world_changed: true,
                     ..CommandOutcome::default()
                 }
             }
@@ -59,6 +62,7 @@ impl CommandRegistry {
                 ctx.world.time_of_day.set_normalized_time(0.70);
                 CommandOutcome {
                     lines: vec!["TIME SET TO NIGHT".to_string()],
+                    world_changed: true,
                     ..CommandOutcome::default()
                 }
             }
@@ -70,6 +74,7 @@ impl CommandRegistry {
                         ctx.world.time_of_day.set_normalized_time(value);
                         CommandOutcome {
                             lines: vec![format!("TIME SET TO {:.2}", value.rem_euclid(1.0))],
+                            world_changed: true,
                             ..CommandOutcome::default()
                         }
                     }
@@ -98,6 +103,7 @@ impl CommandRegistry {
                         }
                         CommandOutcome {
                             lines,
+                            world_changed: true,
                             ..CommandOutcome::default()
                         }
                     }
@@ -118,6 +124,7 @@ impl CommandRegistry {
                     player.heal(amount);
                     return CommandOutcome {
                         lines: vec![format!("HEALED TO {}", player.health)],
+                        world_changed: true,
                         ..CommandOutcome::default()
                     };
                 }
@@ -145,6 +152,7 @@ impl CommandRegistry {
                         }
                         CommandOutcome {
                             lines: vec![format!("SPAWNED {count} ENEMIES")],
+                            world_changed: true,
                             ..CommandOutcome::default()
                         }
                     }
@@ -162,13 +170,19 @@ impl CommandRegistry {
                         };
                         match tier {
                             Some(tier) => {
-                                let position = (ctx.player_position
+                                let mut position = (ctx.player_position
                                     + ctx.player_forward.normalize_or_zero() * 4.0)
                                     .round()
                                     .as_ivec3();
+                                if let Some(surface) =
+                                    (ctx.find_surface_height)(position.x, position.z)
+                                {
+                                    position.y = surface + 1;
+                                }
                                 ctx.world.spawn_debug_chest(position, tier);
                                 CommandOutcome {
                                     lines: vec![format!("SPAWNED {} CHEST", tier.label())],
+                                    world_changed: true,
                                     ..CommandOutcome::default()
                                 }
                             }
@@ -194,6 +208,7 @@ impl CommandRegistry {
             "load" => CommandOutcome {
                 lines: vec!["WORLD LOAD REQUESTED".to_string()],
                 load_requested: true,
+                world_changed: true,
                 ..CommandOutcome::default()
             },
             _ => CommandOutcome {
@@ -220,10 +235,77 @@ mod tests {
             world: &mut world,
             player_position: Vec3::ZERO,
             player_forward: Vec3::Z,
+            find_surface_height: &mut |_, _| Some(0),
         };
 
         let outcome = registry.execute("/time set 0.75", &mut context);
         assert_eq!(outcome.lines[0], "TIME SET TO 0.75");
         assert!(context.world.time_of_day.is_night());
+        assert!(outcome.world_changed);
+    }
+
+    #[test]
+    fn help_and_local_chat_do_not_mark_world_changed() {
+        let mut world = WorldRuntimeState::new_singleplayer(7);
+        let registry = CommandRegistry::new();
+        let mut context = CommandContext {
+            world: &mut world,
+            player_position: Vec3::ZERO,
+            player_forward: Vec3::Z,
+            find_surface_height: &mut |_, _| Some(0),
+        };
+
+        let help = registry.execute("/help", &mut context);
+        assert!(!help.world_changed);
+
+        let local_chat = registry.execute("hello there", &mut context);
+        assert!(!local_chat.world_changed);
+    }
+
+    #[test]
+    fn unknown_command_does_not_mark_world_changed() {
+        let mut world = WorldRuntimeState::new_singleplayer(7);
+        let registry = CommandRegistry::new();
+        let mut context = CommandContext {
+            world: &mut world,
+            player_position: Vec3::ZERO,
+            player_forward: Vec3::Z,
+            find_surface_height: &mut |_, _| Some(0),
+        };
+
+        let outcome = registry.execute("/does-not-exist", &mut context);
+        assert!(!outcome.world_changed);
+    }
+
+    #[test]
+    fn chest_spawn_marks_world_changed() {
+        let mut world = WorldRuntimeState::new_singleplayer(7);
+        let registry = CommandRegistry::new();
+        let mut context = CommandContext {
+            world: &mut world,
+            player_position: Vec3::ZERO,
+            player_forward: Vec3::Z,
+            find_surface_height: &mut |_, _| Some(0),
+        };
+
+        let outcome = registry.execute("/spawn chest common", &mut context);
+        assert!(outcome.world_changed);
+    }
+
+    #[test]
+    fn chest_spawn_snaps_to_surface_height() {
+        let mut world = WorldRuntimeState::new_singleplayer(7);
+        let registry = CommandRegistry::new();
+        let mut context = CommandContext {
+            world: &mut world,
+            player_position: Vec3::ZERO,
+            player_forward: Vec3::Z,
+            find_surface_height: &mut |_, _| Some(12),
+        };
+
+        registry.execute("/spawn chest common", &mut context);
+
+        let chest = context.world.chests.last().expect("expected spawned chest");
+        assert_eq!(chest.position[1], 13);
     }
 }

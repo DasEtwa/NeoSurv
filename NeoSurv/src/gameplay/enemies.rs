@@ -1,7 +1,10 @@
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::{renderer::StaticModelMesh, world::state::PlayerRuntimeState};
+use crate::{
+    renderer::{MeshInstance, StaticModelMesh},
+    world::state::PlayerRuntimeState,
+};
 
 use super::{
     damage::{DamageEvent, DamageResolution, resolve_damage},
@@ -16,6 +19,10 @@ const ENEMY_ATTACK_DAMAGE: i32 = 12;
 const ENEMY_ATTACK_COOLDOWN: f32 = 1.1;
 const ENEMY_AGGRO_RANGE: f32 = 18.0;
 const ENEMY_WANDER_RADIUS: f32 = 3.0;
+const ENEMY_NAV_LOOKAHEAD: f32 = 0.9;
+const ENEMY_EYE_HEIGHT: f32 = 0.9;
+const ENEMY_HEAD_HEIGHT: f32 = 1.6;
+const ENEMY_LINE_OF_SIGHT_STEP: f32 = 0.45;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum EnemyKind {
@@ -186,15 +193,17 @@ impl EnemyRoster {
         }
     }
 
-    pub(crate) fn tick_ai<F>(
+    pub(crate) fn tick_ai<F, G>(
         &mut self,
         dt_seconds: f32,
         player_position: Vec3,
         player_runtime: &mut PlayerRuntimeState,
         mut find_surface_height: F,
+        mut is_walk_blocked: G,
     ) -> bool
     where
         F: FnMut(i32, i32) -> Option<i32>,
+        G: FnMut(glam::IVec3) -> bool,
     {
         let mut player_damaged = false;
 
@@ -210,10 +219,11 @@ impl EnemyRoster {
             let horizontal_to_spawn = Vec3::new(to_spawn.x, 0.0, to_spawn.z);
             let distance_to_player = horizontal_to_player.length();
             let distance_to_spawn = horizontal_to_spawn.length();
+            let has_player_line_of_sight = has_line_of_sight(position, player_position, &mut is_walk_blocked);
 
             let mut desired_move = Vec3::ZERO;
 
-            if distance_to_player <= ENEMY_ATTACK_RANGE {
+            if distance_to_player <= ENEMY_ATTACK_RANGE && has_player_line_of_sight {
                 enemy.brain_state = EnemyBrainState::Attack;
                 if enemy.attack_cooldown <= 0.0 {
                     player_runtime.apply_damage(ENEMY_ATTACK_DAMAGE);
@@ -227,10 +237,24 @@ impl EnemyRoster {
                 }
             } else if distance_to_player <= ENEMY_AGGRO_RANGE {
                 enemy.brain_state = EnemyBrainState::Chase;
-                desired_move = horizontal_to_player.normalize_or_zero() * ENEMY_MOVE_SPEED;
+                desired_move = choose_navigation_move(
+                    position,
+                    horizontal_to_player,
+                    ENEMY_MOVE_SPEED,
+                    dt_seconds,
+                    enemy.id,
+                    &mut is_walk_blocked,
+                );
             } else if distance_to_spawn > enemy.leash_radius {
                 enemy.brain_state = EnemyBrainState::ReturnToSpawn;
-                desired_move = horizontal_to_spawn.normalize_or_zero() * ENEMY_MOVE_SPEED;
+                desired_move = choose_navigation_move(
+                    position,
+                    horizontal_to_spawn,
+                    ENEMY_MOVE_SPEED,
+                    dt_seconds,
+                    enemy.id,
+                    &mut is_walk_blocked,
+                );
             } else {
                 enemy.brain_state = EnemyBrainState::Wander;
                 let wander_target = spawn_origin
@@ -239,8 +263,14 @@ impl EnemyRoster {
                         0.0,
                         enemy.wander_phase.sin() * ENEMY_WANDER_RADIUS,
                     );
-                desired_move =
-                    (wander_target - position).normalize_or_zero() * (ENEMY_MOVE_SPEED * 0.45);
+                desired_move = choose_navigation_move(
+                    position,
+                    wander_target - position,
+                    ENEMY_MOVE_SPEED * 0.45,
+                    dt_seconds,
+                    enemy.id,
+                    &mut is_walk_blocked,
+                );
             }
 
             let mut new_position = position + desired_move * dt_seconds;
@@ -271,13 +301,29 @@ impl EnemyRoster {
         }
     }
 
-    pub(crate) fn build_meshes(&self) -> Vec<StaticModelMesh> {
-        let mut meshes = Vec::with_capacity(self.enemies.len() * 2);
+    pub(crate) fn build_templates() -> Vec<StaticModelMesh> {
+        vec![
+            build_box_mesh(
+                "enemy-body-template",
+                Vec3::new(-0.40, 0.0, -0.28),
+                Vec3::new(0.40, 1.25, 0.28),
+                [1.0, 1.0, 1.0, 1.0],
+            ),
+            build_box_mesh(
+                "enemy-head-template",
+                Vec3::new(-0.28, 1.25, -0.28),
+                Vec3::new(0.28, 1.85, 0.28),
+                [1.0, 1.0, 1.0, 1.0],
+            ),
+        ]
+    }
+
+    pub(crate) fn build_instances(&self) -> Vec<MeshInstance> {
+        let mut instances = Vec::with_capacity(self.enemies.len() * 2);
 
         for enemy in &self.enemies {
             let base = enemy.position_vec3();
             let hp_ratio = (enemy.hp as f32 / enemy.max_hp.max(1) as f32).clamp(0.0, 1.0);
-
             let body_color = match enemy.brain_state {
                 EnemyBrainState::Chase | EnemyBrainState::Attack => {
                     [0.96, 0.18 + 0.40 * hp_ratio, 0.22, 1.0]
@@ -287,22 +333,154 @@ impl EnemyRoster {
                     [0.64, 0.64 * hp_ratio, 0.70, 1.0]
                 }
             };
-            let head_color = [0.94, 0.90, 0.78, 1.0];
 
-            meshes.push(build_box_mesh(
-                format!("enemy-body-{}", enemy.id),
-                base + Vec3::new(-0.40, 0.0, -0.28),
-                base + Vec3::new(0.40, 1.25, 0.28),
+            instances.push(MeshInstance::new(
+                "enemy-body-template",
+                Mat4::from_translation(base),
                 body_color,
             ));
-            meshes.push(build_box_mesh(
-                format!("enemy-head-{}", enemy.id),
-                base + Vec3::new(-0.28, 1.25, -0.28),
-                base + Vec3::new(0.28, 1.85, 0.28),
-                head_color,
+            instances.push(MeshInstance::new(
+                "enemy-head-template",
+                Mat4::from_translation(base),
+                [0.94, 0.90, 0.78, 1.0],
             ));
         }
 
-        meshes
+        instances
+    }
+}
+
+fn choose_navigation_move<G>(
+    position: Vec3,
+    desired_horizontal: Vec3,
+    speed: f32,
+    dt_seconds: f32,
+    enemy_id: u64,
+    is_walk_blocked: &mut G,
+) -> Vec3
+where
+    G: FnMut(glam::IVec3) -> bool,
+{
+    let desired = Vec3::new(desired_horizontal.x, 0.0, desired_horizontal.z).normalize_or_zero();
+    if desired.length_squared() <= f32::EPSILON {
+        return Vec3::ZERO;
+    }
+
+    let left = Vec3::new(-desired.z, 0.0, desired.x);
+    let preferred_side = if enemy_id % 2 == 0 { left } else { -left };
+    let secondary_side = -preferred_side;
+    let candidates = [
+        desired,
+        (desired * 0.82 + preferred_side * 0.58).normalize_or_zero(),
+        (desired * 0.82 + secondary_side * 0.58).normalize_or_zero(),
+        preferred_side.normalize_or_zero(),
+        secondary_side.normalize_or_zero(),
+    ];
+    let probe_distance = (speed * dt_seconds).max(ENEMY_NAV_LOOKAHEAD);
+
+    for direction in candidates {
+        if direction.length_squared() <= f32::EPSILON {
+            continue;
+        }
+
+        let lookahead = position + direction * probe_distance;
+        if !is_enemy_position_blocked(lookahead, is_walk_blocked) {
+            return direction * speed;
+        }
+    }
+
+    Vec3::ZERO
+}
+
+fn has_line_of_sight<G>(from: Vec3, to: Vec3, is_walk_blocked: &mut G) -> bool
+where
+    G: FnMut(glam::IVec3) -> bool,
+{
+    let start = from + Vec3::Y * ENEMY_EYE_HEIGHT;
+    let end = to + Vec3::Y * ENEMY_EYE_HEIGHT;
+    let delta = end - start;
+    let distance = delta.length();
+    if distance <= f32::EPSILON {
+        return true;
+    }
+
+    let steps = (distance / ENEMY_LINE_OF_SIGHT_STEP).ceil() as usize;
+    let direction = delta / steps.max(1) as f32;
+
+    for step in 1..steps {
+        let probe = start + direction * step as f32;
+        if is_enemy_position_blocked(probe, is_walk_blocked) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn is_enemy_position_blocked<G>(position: Vec3, is_walk_blocked: &mut G) -> bool
+where
+    G: FnMut(glam::IVec3) -> bool,
+{
+    let foot = position.floor().as_ivec3();
+    let torso = (position + Vec3::Y * ENEMY_EYE_HEIGHT).floor().as_ivec3();
+    let head = (position + Vec3::Y * ENEMY_HEAD_HEIGHT).floor().as_ivec3();
+    is_walk_blocked(foot) || is_walk_blocked(torso) || is_walk_blocked(head)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inventory::InventoryState;
+
+    fn player_runtime() -> PlayerRuntimeState {
+        PlayerRuntimeState {
+            id: 1,
+            pose: None,
+            health: 100,
+            max_health: 100,
+            inventory: InventoryState::new_default_loadout(),
+        }
+    }
+
+    #[test]
+    fn melee_attack_requires_line_of_sight() {
+        let mut enemies = EnemyRoster::new();
+        enemies.spawn_enemy(1, EnemyKind::MeleeHunter, Vec3::new(0.0, 1.0, 0.0), None);
+        let mut player = player_runtime();
+
+        let player_damaged = enemies.tick_ai(
+            0.2,
+            Vec3::new(1.0, 1.0, 0.0),
+            &mut player,
+            |_, _| Some(0),
+            |world| world.x == 0 && world.z == 0 && world.y >= 1,
+        );
+
+        assert!(!player_damaged);
+        assert_eq!(player.health, 100);
+    }
+
+    #[test]
+    fn chase_navigation_steers_around_blocked_forward_cell() {
+        let mut enemies = EnemyRoster::new();
+        enemies.spawn_enemy(2, EnemyKind::MeleeHunter, Vec3::new(0.0, 1.0, 0.0), None);
+        let mut player = player_runtime();
+
+        enemies.tick_ai(
+            0.5,
+            Vec3::new(6.0, 1.0, 0.0),
+            &mut player,
+            |_, _| Some(0),
+            |world| world.x == 1 && world.z == 0 && world.y >= 1,
+        );
+
+        let enemy = enemies.enemies().first().expect("enemy should remain active");
+        let moved = enemy.position_vec3();
+        assert!(moved.z.abs() > 0.01, "enemy should sidestep around obstacle");
+        let occupied = moved.floor().as_ivec3();
+        assert!(
+            !(occupied.x == 1 && occupied.z == 0),
+            "enemy should not enter the blocked forward cell"
+        );
     }
 }

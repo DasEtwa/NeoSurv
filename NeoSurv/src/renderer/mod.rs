@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
+    hash::Hasher,
     mem,
     sync::Arc,
 };
@@ -56,6 +57,27 @@ pub(crate) struct StaticModelMesh {
     pub(crate) indices: Vec<u32>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct MeshInstance {
+    pub(crate) template_label: String,
+    pub(crate) model: [[f32; 4]; 4],
+    pub(crate) tint: [f32; 4],
+}
+
+impl MeshInstance {
+    pub(crate) fn new(
+        template_label: impl Into<String>,
+        model: Mat4,
+        tint: [f32; 4],
+    ) -> Self {
+        Self {
+            template_label: template_label.into(),
+            model: model.to_cols_array_2d(),
+            tint,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StaticModelVertex {
     pub(crate) position: [f32; 3],
@@ -108,6 +130,10 @@ impl Renderer {
         self.inner.set_visible_chunks(coords);
     }
 
+    pub(crate) fn set_chunk_upload_focus(&mut self, coord: ChunkCoord) {
+        self.inner.set_chunk_upload_focus(coord);
+    }
+
     pub(crate) fn set_chunk_upload_budget_bytes_per_frame(&mut self, budget_bytes: usize) {
         self.inner
             .set_chunk_upload_budget_bytes_per_frame(budget_bytes);
@@ -121,12 +147,24 @@ impl Renderer {
         self.inner.replace_static_model_meshes(meshes);
     }
 
-    pub(crate) fn replace_dynamic_model_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
-        self.inner.replace_dynamic_model_meshes(meshes);
+    pub(crate) fn sync_dynamic_model_templates(&mut self, meshes: Vec<StaticModelMesh>) {
+        self.inner.sync_dynamic_model_templates(meshes);
+    }
+
+    pub(crate) fn replace_dynamic_model_instances(&mut self, instances: Vec<MeshInstance>) {
+        self.inner.replace_dynamic_model_instances(instances);
+    }
+
+    pub(crate) fn sync_viewmodel_templates(&mut self, meshes: Vec<StaticModelMesh>) {
+        self.inner.sync_viewmodel_templates(meshes);
     }
 
     pub(crate) fn replace_viewmodel_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
         self.inner.replace_viewmodel_meshes(meshes);
+    }
+
+    pub(crate) fn replace_viewmodel_instances(&mut self, instances: Vec<MeshInstance>) {
+        self.inner.replace_viewmodel_instances(instances);
     }
 }
 
@@ -218,6 +256,29 @@ impl CameraUniform {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ModelUniform {
+    model: [[f32; 4]; 4],
+    tint: [f32; 4],
+}
+
+impl ModelUniform {
+    fn identity() -> Self {
+        Self {
+            model: Mat4::IDENTITY.to_cols_array_2d(),
+            tint: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    fn from_instance(instance: &MeshInstance) -> Self {
+        Self {
+            model: instance.model,
+            tint: instance.tint,
+        }
+    }
+}
+
 struct GpuChunkMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
@@ -231,6 +292,7 @@ struct GpuStaticModelMesh {
     index_count: u32,
     vertex_capacity_bytes: usize,
     index_capacity_bytes: usize,
+    content_hash: u64,
 }
 
 #[repr(C)]
@@ -282,6 +344,104 @@ enum ChunkUploadOp {
     },
 }
 
+impl ChunkUploadOp {
+    fn coord(&self) -> ChunkCoord {
+        match self {
+            Self::Upsert { coord, .. } | Self::Remove { coord } => *coord,
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Upsert { estimated_bytes, .. } => *estimated_bytes,
+            Self::Remove { .. } => 0,
+        }
+    }
+
+    fn is_remove(&self) -> bool {
+        matches!(self, Self::Remove { .. })
+    }
+}
+
+struct PendingChunkUploadEntry {
+    sequence: u64,
+    op: ChunkUploadOp,
+}
+
+#[derive(Default)]
+struct PendingChunkUploadQueue {
+    entries: HashMap<ChunkCoord, PendingChunkUploadEntry>,
+    next_sequence: u64,
+}
+
+impl PendingChunkUploadQueue {
+    fn enqueue(&mut self, op: ChunkUploadOp) {
+        let coord = op.coord();
+        let entry = PendingChunkUploadEntry {
+            sequence: self.next_sequence,
+            op,
+        };
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.entries.insert(coord, entry);
+    }
+
+    fn reinsert(&mut self, entry: PendingChunkUploadEntry) {
+        self.entries.insert(entry.op.coord(), entry);
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn pop_best(
+        &mut self,
+        visible_chunks: &HashSet<ChunkCoord>,
+        focus_chunk: Option<ChunkCoord>,
+    ) -> Option<PendingChunkUploadEntry> {
+        let coord = self
+            .entries
+            .iter()
+            .min_by_key(|(coord, entry)| Self::priority_key(**coord, entry, visible_chunks, focus_chunk))
+            .map(|(coord, _)| *coord)?;
+
+        self.entries.remove(&coord)
+    }
+
+    fn priority_key(
+        coord: ChunkCoord,
+        entry: &PendingChunkUploadEntry,
+        visible_chunks: &HashSet<ChunkCoord>,
+        focus_chunk: Option<ChunkCoord>,
+    ) -> (u8, i64, std::cmp::Reverse<u64>) {
+        let distance_sq = focus_chunk
+            .map(|focus| chunk_distance_sq(coord, focus))
+            .unwrap_or(i64::MAX / 4);
+        let class = if entry.op.is_remove() {
+            0
+        } else if visible_chunks.contains(&coord) {
+            1
+        } else {
+            2
+        };
+
+        (class, distance_sq, std::cmp::Reverse(entry.sequence))
+    }
+}
+
+fn chunk_distance_sq(left: ChunkCoord, right: ChunkCoord) -> i64 {
+    let dx = i64::from(left.x - right.x);
+    let dy = i64::from(left.y - right.y);
+    let dz = i64::from(left.z - right.z);
+    dx * dx + dy * dy + dz * dz
+}
+
+fn hash_mesh_bytes(vertex_bytes: &[u8], index_bytes: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(vertex_bytes);
+    hasher.write(index_bytes);
+    hasher.finish()
+}
+
 struct WgpuBackend {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -299,15 +459,21 @@ struct WgpuBackend {
     block_texture_bind_group: wgpu::BindGroup,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    model_buffer: wgpu::Buffer,
+    model_bind_group: wgpu::BindGroup,
     depth_format: wgpu::TextureFormat,
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     chunk_meshes: HashMap<ChunkCoord, GpuChunkMesh>,
     static_model_meshes: Vec<GpuStaticModelMesh>,
-    dynamic_model_meshes: Vec<GpuStaticModelMesh>,
+    dynamic_model_templates: HashMap<String, GpuStaticModelMesh>,
+    dynamic_model_instances: Vec<MeshInstance>,
     viewmodel_meshes: Vec<GpuStaticModelMesh>,
-    pending_chunk_uploads: VecDeque<ChunkUploadOp>,
+    viewmodel_templates: HashMap<String, GpuStaticModelMesh>,
+    viewmodel_instances: Vec<MeshInstance>,
+    pending_chunk_uploads: PendingChunkUploadQueue,
     visible_chunks: HashSet<ChunkCoord>,
+    upload_focus_chunk: Option<ChunkCoord>,
     upload_budget_bytes_per_frame: usize,
     frame_stats: VoxelFrameStats,
 }
@@ -410,6 +576,40 @@ impl WgpuBackend {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+
+        let model_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("tokenburner-model-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(
+                            std::num::NonZeroU64::new(mem::size_of::<ModelUniform>() as u64)
+                                .expect("model uniform size should be > 0"),
+                        ),
+                    },
+                    count: None,
+                }],
+            });
+
+        let model_uniform = ModelUniform::identity();
+        let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tokenburner-model-uniform"),
+            contents: bytemuck::bytes_of(&model_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tokenburner-model-bg"),
+            layout: &model_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: model_buffer.as_entire_binding(),
             }],
         });
 
@@ -542,7 +742,7 @@ impl WgpuBackend {
         let static_model_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("tokenburner-static-model-pipeline-layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &model_bind_group_layout],
                 immediate_size: 0,
             });
 
@@ -741,15 +941,21 @@ impl WgpuBackend {
             block_texture_bind_group,
             camera_buffer,
             camera_bind_group,
+            model_buffer,
+            model_bind_group,
             depth_format,
             _depth_texture: depth_texture,
             depth_view,
             chunk_meshes: HashMap::new(),
             static_model_meshes: Vec::new(),
-            dynamic_model_meshes: Vec::new(),
+            dynamic_model_templates: HashMap::new(),
+            dynamic_model_instances: Vec::new(),
             viewmodel_meshes: Vec::new(),
-            pending_chunk_uploads: VecDeque::new(),
+            viewmodel_templates: HashMap::new(),
+            viewmodel_instances: Vec::new(),
+            pending_chunk_uploads: PendingChunkUploadQueue::default(),
             visible_chunks: HashSet::new(),
+            upload_focus_chunk: None,
             upload_budget_bytes_per_frame: 2 * 1024 * 1024,
             frame_stats: VoxelFrameStats::default(),
         })
@@ -894,8 +1100,7 @@ impl WgpuBackend {
 
     fn enqueue_chunk_mesh_upload(&mut self, coord: ChunkCoord, mesh: ChunkMesh) {
         if mesh.is_empty() {
-            self.pending_chunk_uploads
-                .push_back(ChunkUploadOp::Remove { coord });
+            self.pending_chunk_uploads.enqueue(ChunkUploadOp::Remove { coord });
             return;
         }
 
@@ -905,7 +1110,7 @@ impl WgpuBackend {
         let estimated_bytes = vertices.len() * mem::size_of::<GpuChunkVertex>()
             + indices.len() * mem::size_of::<u32>();
 
-        self.pending_chunk_uploads.push_back(ChunkUploadOp::Upsert {
+        self.pending_chunk_uploads.enqueue(ChunkUploadOp::Upsert {
             coord,
             vertices,
             indices,
@@ -914,8 +1119,7 @@ impl WgpuBackend {
     }
 
     fn enqueue_chunk_mesh_remove(&mut self, coord: ChunkCoord) {
-        self.pending_chunk_uploads
-            .push_back(ChunkUploadOp::Remove { coord });
+        self.pending_chunk_uploads.enqueue(ChunkUploadOp::Remove { coord });
     }
 
     fn set_visible_chunks<I>(&mut self, coords: I)
@@ -924,6 +1128,10 @@ impl WgpuBackend {
     {
         self.visible_chunks.clear();
         self.visible_chunks.extend(coords);
+    }
+
+    fn set_chunk_upload_focus(&mut self, coord: ChunkCoord) {
+        self.upload_focus_chunk = Some(coord);
     }
 
     fn set_chunk_upload_budget_bytes_per_frame(&mut self, budget_bytes: usize) {
@@ -939,14 +1147,27 @@ impl WgpuBackend {
         self.static_model_meshes = self.upload_static_model_meshes_reuse(existing, meshes);
     }
 
-    fn replace_dynamic_model_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
-        let existing = std::mem::take(&mut self.dynamic_model_meshes);
-        self.dynamic_model_meshes = self.upload_static_model_meshes_reuse(existing, meshes);
+    fn sync_dynamic_model_templates(&mut self, meshes: Vec<StaticModelMesh>) {
+        let existing = std::mem::take(&mut self.dynamic_model_templates);
+        self.dynamic_model_templates = self.sync_model_templates(existing, meshes);
+    }
+
+    fn replace_dynamic_model_instances(&mut self, instances: Vec<MeshInstance>) {
+        self.dynamic_model_instances = instances;
+    }
+
+    fn sync_viewmodel_templates(&mut self, meshes: Vec<StaticModelMesh>) {
+        let existing = std::mem::take(&mut self.viewmodel_templates);
+        self.viewmodel_templates = self.sync_model_templates(existing, meshes);
     }
 
     fn replace_viewmodel_meshes(&mut self, meshes: Vec<StaticModelMesh>) {
         let existing = std::mem::take(&mut self.viewmodel_meshes);
         self.viewmodel_meshes = self.upload_static_model_meshes_reuse(existing, meshes);
+    }
+
+    fn replace_viewmodel_instances(&mut self, instances: Vec<MeshInstance>) {
+        self.viewmodel_instances = instances;
     }
 
     fn upload_static_model_meshes_reuse(
@@ -983,6 +1204,48 @@ impl WgpuBackend {
             .collect()
     }
 
+    fn sync_model_templates(
+        &self,
+        existing: HashMap<String, GpuStaticModelMesh>,
+        meshes: Vec<StaticModelMesh>,
+    ) -> HashMap<String, GpuStaticModelMesh> {
+        let mut existing_by_label = existing;
+        let mut synced = HashMap::with_capacity(meshes.len());
+
+        for mesh in meshes
+            .into_iter()
+            .filter(|mesh| !mesh.vertices.is_empty() && !mesh.indices.is_empty())
+        {
+            let gpu_vertices: Vec<GpuStaticModelVertex> =
+                mesh.vertices.into_iter().map(Into::into).collect();
+            let vertex_bytes = bytemuck::cast_slice(&gpu_vertices);
+            let index_bytes = bytemuck::cast_slice(&mesh.indices);
+            let content_hash = hash_mesh_bytes(vertex_bytes, index_bytes);
+
+            let gpu_mesh = if let Some(mut cached) = existing_by_label.remove(&mesh.label) {
+                if cached.content_hash == content_hash {
+                    cached
+                } else if vertex_bytes.len() <= cached.vertex_capacity_bytes
+                    && index_bytes.len() <= cached.index_capacity_bytes
+                {
+                    self.queue.write_buffer(&cached.vertex_buffer, 0, vertex_bytes);
+                    self.queue.write_buffer(&cached.index_buffer, 0, index_bytes);
+                    cached.index_count = mesh.indices.len() as u32;
+                    cached.content_hash = content_hash;
+                    cached
+                } else {
+                    self.create_gpu_static_model_mesh(mesh.label.clone(), vertex_bytes, index_bytes)
+                }
+            } else {
+                self.create_gpu_static_model_mesh(mesh.label.clone(), vertex_bytes, index_bytes)
+            };
+
+            synced.insert(mesh.label, gpu_mesh);
+        }
+
+        synced
+    }
+
     fn create_gpu_static_model_mesh(
         &self,
         label: String,
@@ -1012,6 +1275,7 @@ impl WgpuBackend {
             index_count: (index_bytes.len() / mem::size_of::<u32>()) as u32,
             vertex_capacity_bytes: vertex_bytes.len().max(4),
             index_capacity_bytes: index_bytes.len().max(4),
+            content_hash: hash_mesh_bytes(vertex_bytes, index_bytes),
         }
     }
 
@@ -1023,11 +1287,19 @@ impl WgpuBackend {
         let budget_bytes = self.upload_budget_bytes_per_frame.max(1);
 
         loop {
-            let Some(op) = self.pending_chunk_uploads.pop_front() else {
+            let Some(entry) = self
+                .pending_chunk_uploads
+                .pop_best(&self.visible_chunks, self.upload_focus_chunk)
+            else {
                 break;
             };
 
-            match op {
+            if uploaded_any && uploaded_bytes.saturating_add(entry.op.estimated_bytes()) > budget_bytes {
+                self.pending_chunk_uploads.reinsert(entry);
+                break;
+            }
+
+            match entry.op {
                 ChunkUploadOp::Remove { coord } => {
                     self.chunk_meshes.remove(&coord);
                 }
@@ -1037,18 +1309,6 @@ impl WgpuBackend {
                     indices,
                     estimated_bytes,
                 } => {
-                    if uploaded_any && uploaded_bytes.saturating_add(estimated_bytes) > budget_bytes
-                    {
-                        self.pending_chunk_uploads
-                            .push_front(ChunkUploadOp::Upsert {
-                                coord,
-                                vertices,
-                                indices,
-                                estimated_bytes,
-                            });
-                        break;
-                    }
-
                     uploaded_any = true;
                     uploaded_bytes = uploaded_bytes.saturating_add(estimated_bytes);
 
@@ -1088,6 +1348,11 @@ impl WgpuBackend {
         }
 
         (uploaded_chunks, uploaded_bytes)
+    }
+
+    fn update_model_uniform(&self, model_uniform: ModelUniform) {
+        self.queue
+            .write_buffer(&self.model_buffer, 0, bytemuck::bytes_of(&model_uniform));
     }
 }
 
@@ -1198,14 +1463,21 @@ impl Backend for WgpuBackend {
 
             rpass.set_pipeline(&self.static_model_pipeline);
             rpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            rpass.set_bind_group(1, &self.model_bind_group, &[]);
 
             for mesh in &self.static_model_meshes {
+                self.update_model_uniform(ModelUniform::identity());
                 rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
 
-            for mesh in &self.dynamic_model_meshes {
+            for instance in &self.dynamic_model_instances {
+                let Some(mesh) = self.dynamic_model_templates.get(&instance.template_label) else {
+                    continue;
+                };
+
+                self.update_model_uniform(ModelUniform::from_instance(instance));
                 rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -1213,8 +1485,21 @@ impl Backend for WgpuBackend {
 
             rpass.set_pipeline(&self.viewmodel_pipeline);
             rpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            rpass.set_bind_group(1, &self.model_bind_group, &[]);
 
             for mesh in &self.viewmodel_meshes {
+                self.update_model_uniform(ModelUniform::identity());
+                rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
+            for instance in &self.viewmodel_instances {
+                let Some(mesh) = self.viewmodel_templates.get(&instance.template_label) else {
+                    continue;
+                };
+
+                self.update_model_uniform(ModelUniform::from_instance(instance));
                 rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -1232,6 +1517,84 @@ impl Backend for WgpuBackend {
         };
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn upsert(coord: ChunkCoord, estimated_bytes: usize) -> ChunkUploadOp {
+        ChunkUploadOp::Upsert {
+            coord,
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            estimated_bytes,
+        }
+    }
+
+    #[test]
+    fn chunk_upload_queue_deduplicates_latest_op_per_coord() {
+        let coord = ChunkCoord::new(1, 0, 1);
+        let mut queue = PendingChunkUploadQueue::default();
+        queue.enqueue(upsert(coord, 128));
+        queue.enqueue(ChunkUploadOp::Remove { coord });
+
+        assert_eq!(queue.len(), 1);
+        let best = queue.pop_best(&HashSet::new(), Some(ChunkCoord::new(0, 0, 0)));
+        assert!(matches!(best.map(|entry| entry.op), Some(ChunkUploadOp::Remove { coord: c }) if c == coord));
+    }
+
+    #[test]
+    fn newer_upsert_replaces_older_remove_for_same_coord() {
+        let coord = ChunkCoord::new(2, 0, 2);
+        let mut queue = PendingChunkUploadQueue::default();
+        queue.enqueue(ChunkUploadOp::Remove { coord });
+        queue.enqueue(upsert(coord, 256));
+
+        assert_eq!(queue.len(), 1);
+        let best = queue.pop_best(&HashSet::new(), Some(ChunkCoord::new(0, 0, 0)));
+        assert!(matches!(
+            best.map(|entry| entry.op),
+            Some(ChunkUploadOp::Upsert { coord: c, .. }) if c == coord
+        ));
+    }
+
+    #[test]
+    fn chunk_upload_queue_prioritizes_visible_then_near_chunks() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let visible = ChunkCoord::new(2, 0, 0);
+        let near = ChunkCoord::new(1, 0, 0);
+        let far = ChunkCoord::new(7, 0, 0);
+        let mut queue = PendingChunkUploadQueue::default();
+        queue.enqueue(upsert(far, 256));
+        queue.enqueue(upsert(near, 256));
+        queue.enqueue(upsert(visible, 256));
+
+        let mut visible_chunks = HashSet::new();
+        visible_chunks.insert(visible);
+
+        let first = queue.pop_best(&visible_chunks, Some(focus)).unwrap();
+        assert_eq!(first.op.coord(), visible);
+
+        let second = queue.pop_best(&visible_chunks, Some(focus)).unwrap();
+        assert_eq!(second.op.coord(), near);
+    }
+
+    #[test]
+    fn chunk_upload_queue_prioritizes_remove_ops_first() {
+        let focus = ChunkCoord::new(0, 0, 0);
+        let remove_coord = ChunkCoord::new(9, 0, 0);
+        let visible_coord = ChunkCoord::new(1, 0, 0);
+        let mut queue = PendingChunkUploadQueue::default();
+        queue.enqueue(upsert(visible_coord, 64));
+        queue.enqueue(ChunkUploadOp::Remove { coord: remove_coord });
+
+        let mut visible_chunks = HashSet::new();
+        visible_chunks.insert(visible_coord);
+
+        let first = queue.pop_best(&visible_chunks, Some(focus)).unwrap();
+        assert!(matches!(first.op, ChunkUploadOp::Remove { coord } if coord == remove_coord));
     }
 }
 
