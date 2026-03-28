@@ -6,7 +6,7 @@ This project started as more of an engine-style experiment and is now being turn
 
 ## Current Status
 
-Work in progress.
+Work in progress. / Its Heavy Buggy RN
 
 Current features and active areas of development include:
 - voxel world rendering
