@@ -13,6 +13,9 @@ const WORLD_RUNTIME_VERSION: u32 = 1;
 const LOCAL_PLAYER_ID: u64 = 1;
 const PLAYER_MAX_HEALTH: i32 = 100;
 const DAY_NIGHT_CYCLE_SECONDS: f32 = 30.0 * 60.0;
+const SPAWNER_MIN_PLAYER_DISTANCE: f32 = 6.0;
+const SPAWNER_MIN_ENEMY_DISTANCE: f32 = 1.8;
+const SPAWNER_COLLISION_RADIUS: f32 = 0.45;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct TimeOfDayState {
@@ -538,6 +541,13 @@ impl WorldRuntimeState {
             .iter()
             .map(|enemy| enemy.id)
             .collect();
+        let mut enemy_positions: Vec<Vec3> = self
+            .enemies
+            .enemies()
+            .iter()
+            .map(|enemy| Vec3::from_array(enemy.position))
+            .collect();
+        let static_prop_bounds = self.static_prop_bounds();
         let mut pending_spawns = Vec::new();
         let mut next_runtime_id = self.next_runtime_id;
 
@@ -564,19 +574,20 @@ impl WorldRuntimeState {
 
             let spawn_id = next_runtime_id;
             next_runtime_id = next_runtime_id.saturating_add(1);
-            let spawn_position = {
-                let mut position = spawner_position;
-                position.x += (spawn_id % 3) as f32 - 1.0;
-                position.z += ((spawn_id / 3) % 3) as f32 - 1.0;
-                if let Some(surface) =
-                    find_surface_height(position.x.round() as i32, position.z.round() as i32)
-                {
-                    position.y = surface as f32 + 1.0;
-                }
-                position
+            let Some(spawn_position) = find_valid_spawn_position(
+                spawner_position,
+                spawn_id,
+                player_position,
+                &enemy_positions,
+                &static_prop_bounds,
+                &mut find_surface_height,
+            ) else {
+                spawner.cooldown_remaining = (spawner.base_cooldown * 0.35).max(1.0);
+                continue;
             };
 
             pending_spawns.push((spawner.id, spawn_id, spawn_position));
+            enemy_positions.push(spawn_position);
             spawner.active_enemy_ids.push(spawn_id);
             spawner.cooldown_remaining = spawner.base_cooldown;
         }
@@ -746,6 +757,71 @@ fn structure_socket_offset(index: usize, chest: bool) -> IVec3 {
     };
 
     offsets[index % offsets.len()]
+}
+
+fn spawn_candidate_offsets(spawn_id: u64) -> Vec<IVec3> {
+    let seed = (spawn_id % 8) as usize;
+    let base = [
+        IVec3::new(1, 0, 0),
+        IVec3::new(1, 0, 1),
+        IVec3::new(0, 0, 1),
+        IVec3::new(-1, 0, 1),
+        IVec3::new(-1, 0, 0),
+        IVec3::new(-1, 0, -1),
+        IVec3::new(0, 0, -1),
+        IVec3::new(1, 0, -1),
+    ];
+    let mut offsets = Vec::with_capacity(base.len() * 6);
+    for radius in 1..=6 {
+        for index in 0..base.len() {
+            offsets.push(base[(index + seed) % base.len()] * radius);
+        }
+    }
+    offsets
+}
+
+fn find_valid_spawn_position<F>(
+    spawner_position: Vec3,
+    spawn_id: u64,
+    player_position: Vec3,
+    enemy_positions: &[Vec3],
+    static_prop_bounds: &[(Vec3, Vec3)],
+    find_surface_height: &mut F,
+) -> Option<Vec3>
+where
+    F: FnMut(i32, i32) -> Option<i32>,
+{
+    for offset in spawn_candidate_offsets(spawn_id) {
+        let candidate_x = (spawner_position.x.round() as i32) + offset.x;
+        let candidate_z = (spawner_position.z.round() as i32) + offset.z;
+        let Some(surface) = find_surface_height(candidate_x, candidate_z) else {
+            continue;
+        };
+
+        let candidate = Vec3::new(candidate_x as f32 + 0.5, surface as f32 + 1.0, candidate_z as f32 + 0.5);
+        if candidate.distance(player_position) < SPAWNER_MIN_PLAYER_DISTANCE {
+            continue;
+        }
+        if enemy_positions
+            .iter()
+            .any(|position| position.distance(candidate) < SPAWNER_MIN_ENEMY_DISTANCE)
+        {
+            continue;
+        }
+        if static_prop_bounds_hit_sphere(static_prop_bounds, candidate, SPAWNER_COLLISION_RADIUS) {
+            continue;
+        }
+
+        return Some(candidate);
+    }
+
+    None
+}
+
+fn static_prop_bounds_hit_sphere(bounds: &[(Vec3, Vec3)], center: Vec3, radius: f32) -> bool {
+    bounds
+        .iter()
+        .any(|(min, max)| sphere_intersects_aabb(center, radius, *min, *max))
 }
 
 fn structure_occluder_bounds(structure: &StructureInstance) -> Vec<(Vec3, Vec3)> {
@@ -936,5 +1012,23 @@ mod tests {
         );
 
         assert!(state.static_prop_intersects_sphere(center, 0.2));
+    }
+
+    #[test]
+    fn spawn_validation_skips_positions_too_close_to_player_or_props() {
+        let player = Vec3::new(1.5, 1.0, 0.5);
+        let bounds = vec![(Vec3::new(0.0, 0.0, 1.0), Vec3::new(2.0, 3.0, 2.0))];
+        let spawn = find_valid_spawn_position(
+            Vec3::new(0.5, 1.0, 0.5),
+            0,
+            player,
+            &[],
+            &bounds,
+            &mut |_, _| Some(0),
+        )
+        .expect("expected validated spawn candidate");
+
+        assert!(spawn.distance(player) >= SPAWNER_MIN_PLAYER_DISTANCE);
+        assert!(!static_prop_bounds_hit_sphere(&bounds, spawn, SPAWNER_COLLISION_RADIUS));
     }
 }

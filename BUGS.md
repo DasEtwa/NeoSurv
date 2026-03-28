@@ -181,7 +181,7 @@ What was fixed:
 
 ### 9. Spawner position validation is weak
 
-Status: open
+Status: fixed
 
 Symptoms:
 
@@ -190,6 +190,12 @@ Symptoms:
 Likely areas:
 
 - `src/world/state.rs`
+
+What was fixed:
+
+- spawner enemy placement now searches outward through multiple candidate rings instead of accepting a tiny fixed offset near the spawner
+- validated spawn positions now reject spots that are too close to the player, overlap static props, or stack into existing enemy positions
+- regression coverage now checks that the validation path skips bad player/prop-adjacent candidates
 
 ### 10. Debug chest spawning is not terrain-snapped enough
 
@@ -247,6 +253,11 @@ Likely areas:
 
 - melee enemies no longer attack through blocked space when line of sight is obstructed
 - chase and return movement now choose sidestep candidates when the direct forward cell is blocked
+
+### Fixed: spawner candidate selection now validates terrain, prop, and spacing quality
+
+- enemy spawns now search outward for valid positions instead of relying on a weak one-step offset
+- candidate positions are rejected when they are too close to the player, overlap static props, or crowd existing enemies
 
 ### Fixed: chunk upload queue could not deduplicate or prioritize visible chunks
 
