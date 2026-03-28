@@ -67,6 +67,26 @@ fn find_surface_height_in_world(voxel_world: &VoxelWorld, x: i32, z: i32) -> Opt
     None
 }
 
+fn static_prop_bounds_block_cell(bounds: &[(Vec3, Vec3)], world: IVec3) -> bool {
+    let cell_min = world.as_vec3();
+    let cell_max = cell_min + Vec3::ONE;
+    bounds.iter().any(|(min, max)| {
+        cell_min.x < max.x
+            && cell_max.x > min.x
+            && cell_min.y < max.y
+            && cell_max.y > min.y
+            && cell_min.z < max.z
+            && cell_max.z > min.z
+    })
+}
+
+fn static_prop_bounds_hit_sphere(bounds: &[(Vec3, Vec3)], center: Vec3, radius: f32) -> bool {
+    bounds.iter().any(|(min, max)| {
+        let closest = center.clamp(*min, *max);
+        center.distance_squared(closest) <= radius * radius
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HudTemplateKey {
     health: i32,
@@ -511,13 +531,17 @@ impl EngineApp {
                 self.chat.push_system_line("NO GRENADES");
             }
         }
+        let static_prop_bounds = self.runtime_state.static_prop_bounds();
         let voxel_world = &self.voxel_world;
         self.player.update_look_and_move(
             &mut self.input,
             self.mouse_captured,
             simulation_paused,
             dt_seconds,
-            |world| voxel_world.block_at_world(world).is_some(),
+            |world| {
+                voxel_world.block_at_world(world).is_some()
+                    || static_prop_bounds_block_cell(&static_prop_bounds, world)
+            },
         );
 
         let voxel_report = self.voxel_world.tick(self.player.position());
@@ -528,7 +552,10 @@ impl EngineApp {
             &mut self.input,
             simulation_paused,
             dt_seconds,
-            |world| self.voxel_world.block_at_world(world).is_some(),
+            |world| {
+                self.voxel_world.block_at_world(world).is_some()
+                    || static_prop_bounds_block_cell(&static_prop_bounds, world)
+            },
         );
         if !simulation_paused {
             self.runtime_state.time_of_day.advance(dt_seconds);
@@ -542,9 +569,15 @@ impl EngineApp {
                 });
         }
         self.combat
-            .tick_projectiles(dt_seconds, &mut self.runtime_state.enemies, |world| {
-                self.voxel_world.block_at_world(world).is_some()
-            });
+            .tick_projectiles(
+                dt_seconds,
+                &mut self.runtime_state.enemies,
+                |world| {
+                    self.voxel_world.block_at_world(world).is_some()
+                        || static_prop_bounds_block_cell(&static_prop_bounds, world)
+                },
+                |position, radius| static_prop_bounds_hit_sphere(&static_prop_bounds, position, radius),
+            );
 
         if self.primary_fire_requested && self.mouse_captured && !simulation_paused {
             if let Some(item_id) = self.runtime_state.selected_weapon_item() {

@@ -138,22 +138,25 @@ What was fixed:
 
 ### 7. Structures are not yet fully real gameplay collision
 
-Status: partially fixed
+Status: fixed
 
 What is fixed:
 
 - hitscan and chest interaction now use basic world occlusion checks
-
-What remains:
-
-- structures are still mostly render-world objects instead of full gameplay collision volumes
-- player/projectiles still need stronger structure collision integration
+- player collision probes now treat structure/chest volumes as solid gameplay blockers instead of only voxel terrain
+- projectile collision now stops on structure/chest volumes instead of passing through render-only props
 
 Likely areas:
 
 - `src/world/state.rs`
 - `src/engine.rs`
 - `src/gameplay/projectiles.rs`
+
+What was fixed:
+
+- static structure/chest bounds are now reused as gameplay collision volumes for player movement and gravity checks
+- projectile updates now test against static prop collision as well as voxel terrain, so rockets/grenades no longer ignore structures
+- the new collision path is covered with regression tests for cell blocking and projectile/static-prop impact
 
 ### 8. Enemy AI ignores proper navigation
 
@@ -228,6 +231,11 @@ Likely areas:
 - menu transitions now close chat and clear pending fire requests so gameplay and menu input layers stay mutually exclusive
 - `Escape` closes chat before opening the menu, preventing menu navigation from stealing gameplay/chat keys on the next frame
 - capture toggles are ignored while chat is open, and focus-loss transitions reuse the same menu-open path
+
+### Fixed: structures now participate in gameplay collision for player and projectiles
+
+- player movement and gravity checks now treat structure/chest volumes as solid blockers alongside voxel terrain
+- projectile updates now collide with static prop volumes instead of only voxel blocks
 
 ### Fixed: chunk upload queue could not deduplicate or prioritize visible chunks
 

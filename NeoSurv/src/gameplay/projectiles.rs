@@ -65,9 +65,16 @@ impl ProjectileSystem {
         });
     }
 
-    pub(crate) fn tick<F>(&mut self, dt_seconds: f32, enemies: &mut EnemyRoster, mut is_solid: F)
+    pub(crate) fn tick<F, G>(
+        &mut self,
+        dt_seconds: f32,
+        enemies: &mut EnemyRoster,
+        mut is_solid: F,
+        mut hits_static_prop: G,
+    )
     where
         F: FnMut(IVec3) -> bool,
+        G: FnMut(Vec3, f32) -> bool,
     {
         let mut next_active = Vec::with_capacity(self.active.len());
 
@@ -84,6 +91,14 @@ impl ProjectileSystem {
                 tracing::debug!(
                     weapon = projectile.weapon_id,
                     "projectile collided with world"
+                );
+                continue;
+            }
+
+            if hits_static_prop(projectile.position, projectile.radius) {
+                tracing::debug!(
+                    weapon = projectile.weapon_id,
+                    "projectile collided with static prop"
                 );
                 continue;
             }
@@ -137,5 +152,26 @@ impl ProjectileSystem {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projectile_stops_when_hitting_static_prop_collision() {
+        let mut system = ProjectileSystem::new();
+        let mut enemies = EnemyRoster::new();
+        system.spawn(Vec3::ZERO, Vec3::Z, WeaponDefinition::launcher());
+
+        system.tick(
+            0.05,
+            &mut enemies,
+            |_| false,
+            |position, radius| position.z >= 1.0 - radius,
+        );
+
+        assert!(system.active.is_empty());
     }
 }

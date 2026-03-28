@@ -485,6 +485,31 @@ impl WorldRuntimeState {
         best_distance
     }
 
+    pub(crate) fn static_prop_bounds(&self) -> Vec<(Vec3, Vec3)> {
+        let mut bounds = Vec::with_capacity(self.structures.len() * 5 + self.chests.len());
+        for structure in &self.structures {
+            bounds.extend(structure_occluder_bounds(structure));
+        }
+        for chest in &self.chests {
+            bounds.push(chest_bounds(chest));
+        }
+        bounds
+    }
+
+    pub(crate) fn is_static_prop_cell_solid(&self, world: IVec3) -> bool {
+        let cell_min = world.as_vec3();
+        let cell_max = cell_min + Vec3::ONE;
+        self.static_prop_bounds()
+            .into_iter()
+            .any(|(min, max)| aabb_intersects_aabb(cell_min, cell_max, min, max))
+    }
+
+    pub(crate) fn static_prop_intersects_sphere(&self, center: Vec3, radius: f32) -> bool {
+        self.static_prop_bounds()
+            .into_iter()
+            .any(|(min, max)| sphere_intersects_aabb(center, radius, min, max))
+    }
+
     pub(crate) fn spawn_debug_chest(&mut self, position: IVec3, tier: ChestTier) -> u64 {
         let id = self.alloc_id();
         self.chests.push(ChestState {
@@ -850,6 +875,20 @@ fn ray_aabb_distance(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Opt
     }
 }
 
+fn aabb_intersects_aabb(min_a: Vec3, max_a: Vec3, min_b: Vec3, max_b: Vec3) -> bool {
+    min_a.x < max_b.x
+        && max_a.x > min_b.x
+        && min_a.y < max_b.y
+        && max_a.y > min_b.y
+        && min_a.z < max_b.z
+        && max_a.z > min_b.z
+}
+
+fn sphere_intersects_aabb(center: Vec3, radius: f32, min: Vec3, max: Vec3) -> bool {
+    let closest = center.clamp(min, max);
+    center.distance_squared(closest) <= radius * radius
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -868,5 +907,31 @@ mod tests {
         time.advance(DAY_NIGHT_CYCLE_SECONDS + 10.0);
         assert_eq!(time.elapsed_days, 1);
         assert!(time.normalized_time > 0.0);
+    }
+
+    #[test]
+    fn structures_block_cell_collision_queries() {
+        let state = WorldRuntimeState::new_singleplayer(42);
+        let structure = state.structures.first().expect("expected generated structure");
+        let world = IVec3::new(
+            structure.position[0],
+            structure.position[1] + 1,
+            structure.position[2],
+        );
+
+        assert!(state.is_static_prop_cell_solid(world));
+    }
+
+    #[test]
+    fn static_props_block_sphere_collision_queries() {
+        let state = WorldRuntimeState::new_singleplayer(42);
+        let chest = state.chests.first().expect("expected generated chest");
+        let center = Vec3::new(
+            chest.position[0] as f32 + 0.5,
+            chest.position[1] as f32 + 0.5,
+            chest.position[2] as f32 + 0.5,
+        );
+
+        assert!(state.static_prop_intersects_sphere(center, 0.2));
     }
 }

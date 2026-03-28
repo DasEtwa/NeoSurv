@@ -96,15 +96,18 @@ impl CombatState {
         }
     }
 
-    pub(crate) fn tick_projectiles<F>(
+    pub(crate) fn tick_projectiles<F, G>(
         &mut self,
         dt_seconds: f32,
         enemies: &mut EnemyRoster,
         is_solid: F,
+        hits_static_prop: G,
     ) where
         F: FnMut(IVec3) -> bool,
+        G: FnMut(Vec3, f32) -> bool,
     {
-        self.projectiles.tick(dt_seconds, enemies, is_solid);
+        self.projectiles
+            .tick(dt_seconds, enemies, is_solid, hits_static_prop);
     }
 
     pub(crate) fn dynamic_templates(&self) -> Vec<StaticModelMesh> {
