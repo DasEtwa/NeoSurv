@@ -17,21 +17,33 @@ use crate::world::voxel::{
 enum PipelineJob {
     Generate {
         coord: ChunkCoord,
+        revision: u64,
         neighbors: ChunkNeighborSolidity,
     },
     Remesh {
         coord: ChunkCoord,
+        revision: u64,
         chunk: ChunkData,
         neighbors: ChunkNeighborSolidity,
     },
     Shutdown,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) enum ChunkBuildOutput {
+    BuiltMesh(ChunkMesh),
+    BuiltEmptyButValid,
+    SkippedOrNotReady,
+    Failed,
+}
+
 #[derive(Debug)]
 pub(crate) struct ChunkBuildResult {
     pub(crate) coord: ChunkCoord,
+    pub(crate) revision: u64,
     pub(crate) chunk: ChunkData,
-    pub(crate) mesh: ChunkMesh,
+    pub(crate) output: ChunkBuildOutput,
 }
 
 #[derive(Debug)]
@@ -77,20 +89,30 @@ impl ChunkGenerationPipeline {
                         };
 
                         match job {
-                            Ok(PipelineJob::Generate { coord, neighbors }) => {
+                            Ok(PipelineJob::Generate {
+                                coord,
+                                revision,
+                                neighbors,
+                            }) => {
                                 if worker_cancelled.load(Ordering::Acquire) {
                                     break;
                                 }
 
                                 let chunk = generator.generate_chunk(coord);
                                 let mesh = build_chunk_mesh_with_neighbors(&chunk, &neighbors);
+                                let output = classify_build_output(mesh);
 
                                 if worker_cancelled.load(Ordering::Acquire) {
                                     break;
                                 }
 
                                 if worker_results
-                                    .send(ChunkBuildResult { coord, chunk, mesh })
+                                    .send(ChunkBuildResult {
+                                        coord,
+                                        revision,
+                                        chunk,
+                                        output,
+                                    })
                                     .is_err()
                                 {
                                     break;
@@ -98,6 +120,7 @@ impl ChunkGenerationPipeline {
                             }
                             Ok(PipelineJob::Remesh {
                                 coord,
+                                revision,
                                 chunk,
                                 neighbors,
                             }) => {
@@ -106,13 +129,19 @@ impl ChunkGenerationPipeline {
                                 }
 
                                 let mesh = build_chunk_mesh_with_neighbors(&chunk, &neighbors);
+                                let output = classify_build_output(mesh);
 
                                 if worker_cancelled.load(Ordering::Acquire) {
                                     break;
                                 }
 
                                 if worker_results
-                                    .send(ChunkBuildResult { coord, chunk, mesh })
+                                    .send(ChunkBuildResult {
+                                        coord,
+                                        revision,
+                                        chunk,
+                                        output,
+                                    })
                                     .is_err()
                                 {
                                     break;
@@ -138,6 +167,7 @@ impl ChunkGenerationPipeline {
     pub(crate) fn request_generate_chunk(
         &self,
         coord: ChunkCoord,
+        revision: u64,
         neighbors: ChunkNeighborSolidity,
     ) -> bool {
         if self.cancelled.load(Ordering::Acquire) {
@@ -149,13 +179,18 @@ impl ChunkGenerationPipeline {
         };
 
         job_tx
-            .send(PipelineJob::Generate { coord, neighbors })
+            .send(PipelineJob::Generate {
+                coord,
+                revision,
+                neighbors,
+            })
             .is_ok()
     }
 
     pub(crate) fn request_remesh(
         &self,
         coord: ChunkCoord,
+        revision: u64,
         chunk: ChunkData,
         neighbors: ChunkNeighborSolidity,
     ) -> bool {
@@ -170,6 +205,7 @@ impl ChunkGenerationPipeline {
         job_tx
             .send(PipelineJob::Remesh {
                 coord,
+                revision,
                 chunk,
                 neighbors,
             })
@@ -204,5 +240,13 @@ impl Drop for ChunkGenerationPipeline {
         while let Some(worker) = self.workers.pop() {
             let _ = worker.join();
         }
+    }
+}
+
+fn classify_build_output(mesh: ChunkMesh) -> ChunkBuildOutput {
+    if mesh.is_empty() {
+        ChunkBuildOutput::BuiltEmptyButValid
+    } else {
+        ChunkBuildOutput::BuiltMesh(mesh)
     }
 }

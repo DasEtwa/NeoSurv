@@ -7,7 +7,7 @@ use crate::world::voxel::{
     chunk::{ChunkCoord, ChunkData, split_world_position},
     culling::{Aabb, Frustum},
     meshing::{ChunkMesh, ChunkNeighborSolidity},
-    pipeline::{ChunkBuildResult, ChunkGenerationPipeline},
+    pipeline::{ChunkBuildOutput, ChunkBuildResult, ChunkGenerationPipeline},
     raycast::raycast_voxels,
 };
 
@@ -28,12 +28,28 @@ pub(crate) struct VoxelTickReport {
     pub(crate) mesh_updates_queued: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ChunkResidentState {
+    #[default]
+    Absent,
+    Resident,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ChunkRuntimeState {
+    requested_revision: u64,
+    integrated_revision: u64,
+    pending_revision: Option<u64>,
+    needs_remesh_after_pending: bool,
+    resident_state: ChunkResidentState,
+}
+
 #[derive(Debug)]
 pub(crate) struct VoxelWorld {
     pipeline: ChunkGenerationPipeline,
     chunks: HashMap<ChunkCoord, ChunkData>,
     meshes: HashMap<ChunkCoord, ChunkMesh>,
-    pending: HashSet<ChunkCoord>,
+    chunk_states: HashMap<ChunkCoord, ChunkRuntimeState>,
     integration_backlog: VecDeque<ChunkBuildResult>,
     mesh_updates: VecDeque<ChunkMeshUpdate>,
     dirty_remesh_queue: VecDeque<ChunkCoord>,
@@ -57,7 +73,7 @@ impl VoxelWorld {
             pipeline: ChunkGenerationPipeline::new(seed, worker_count),
             chunks: HashMap::new(),
             meshes: HashMap::new(),
-            pending: HashSet::new(),
+            chunk_states: HashMap::new(),
             integration_backlog: VecDeque::new(),
             mesh_updates: VecDeque::new(),
             dirty_remesh_queue: VecDeque::new(),
@@ -87,13 +103,11 @@ impl VoxelWorld {
                     let coord =
                         ChunkCoord::new(center_chunk.x + x, center_chunk.y + y, center_chunk.z + z);
 
-                    if self.chunks.contains_key(&coord) || self.pending.contains(&coord) {
+                    if self.chunks.contains_key(&coord) || self.has_pending_request(coord) {
                         continue;
                     }
 
-                    let neighbors = self.collect_neighbor_solidity(coord);
-                    if self.pipeline.request_generate_chunk(coord, neighbors) {
-                        self.pending.insert(coord);
+                    if self.request_generate_chunk(coord) {
                         requested += 1;
                     }
                 }
@@ -106,23 +120,18 @@ impl VoxelWorld {
             };
             self.dirty_remesh_set.remove(&coord);
 
-            if !self.chunks.contains_key(&coord)
-                || self.pending.contains(&coord)
-                || !self.is_within_retention(center_chunk, coord)
-            {
+            if !self.chunks.contains_key(&coord) || !self.is_within_retention(center_chunk, coord) {
                 continue;
             }
 
-            let Some(chunk_snapshot) = self.chunks.get(&coord).cloned() else {
+            if self.has_pending_request(coord) {
+                if self.defer_remesh_until_pending_finishes(coord) {
+                    requested += 1;
+                }
                 continue;
-            };
-            let neighbors = self.collect_neighbor_solidity(coord);
+            }
 
-            if self
-                .pipeline
-                .request_remesh(coord, chunk_snapshot, neighbors)
-            {
-                self.pending.insert(coord);
+            if self.request_remesh_chunk(coord) {
                 requested += 1;
             }
         }
@@ -131,7 +140,15 @@ impl VoxelWorld {
             .pipeline
             .drain_completed(self.max_completed_drains_per_tick.max(1))
         {
-            self.pending.remove(&built.coord);
+            let Some(state) = self.chunk_states.get_mut(&built.coord) else {
+                continue;
+            };
+
+            if state.pending_revision != Some(built.revision) {
+                continue;
+            }
+
+            state.pending_revision = None;
 
             if self.is_within_retention(center_chunk, built.coord) {
                 self.integration_backlog.push_back(built);
@@ -148,39 +165,16 @@ impl VoxelWorld {
                 continue;
             }
 
-            let chunk_changed = self
-                .chunks
-                .get(&built.coord)
-                .map(|existing| existing != &built.chunk)
-                .unwrap_or(true);
-
-            self.chunks.insert(built.coord, built.chunk);
-
-            let mesh = built.mesh;
-            if mesh.is_empty() {
-                self.meshes.remove(&built.coord);
-                self.mesh_updates
-                    .push_back(ChunkMeshUpdate::Remove { coord: built.coord });
-            } else {
-                self.meshes.insert(built.coord, mesh.clone());
-                self.mesh_updates.push_back(ChunkMeshUpdate::Upsert {
-                    coord: built.coord,
-                    mesh,
-                });
+            if self.integrate_chunk_result(center_chunk, built) {
+                completed += 1;
             }
-
-            if chunk_changed {
-                self.mark_adjacent_chunks_dirty_for_remesh(built.coord);
-            }
-
-            completed += 1;
         }
 
         VoxelTickReport {
             requested,
             completed,
             loaded_chunks: self.chunks.len(),
-            pending_chunks: self.pending.len(),
+            pending_chunks: self.pending_chunk_count(),
             mesh_updates_queued: self.mesh_updates.len(),
         }
     }
@@ -190,10 +184,17 @@ impl VoxelWorld {
             return false;
         }
 
+        if self.has_pending_request(coord) {
+            return self.defer_remesh_until_pending_finishes(coord);
+        }
+
         if !self.dirty_remesh_set.insert(coord) {
             return false;
         }
 
+        self.chunk_states
+            .entry(coord)
+            .or_insert_with(|| Self::resident_state_for_loaded_chunk());
         self.dirty_remesh_queue.push_back(coord);
         true
     }
@@ -312,6 +313,209 @@ impl VoxelWorld {
         self.chunks.len()
     }
 
+    fn pending_chunk_count(&self) -> usize {
+        self.chunk_states
+            .values()
+            .filter(|state| state.pending_revision.is_some())
+            .count()
+    }
+
+    fn has_pending_request(&self, coord: ChunkCoord) -> bool {
+        self.chunk_states
+            .get(&coord)
+            .and_then(|state| state.pending_revision)
+            .is_some()
+    }
+
+    fn resident_state_for_loaded_chunk() -> ChunkRuntimeState {
+        ChunkRuntimeState {
+            resident_state: ChunkResidentState::Resident,
+            ..ChunkRuntimeState::default()
+        }
+    }
+
+    fn request_generate_chunk(&mut self, coord: ChunkCoord) -> bool {
+        let next_revision = self
+            .chunk_states
+            .get(&coord)
+            .map(|state| state.requested_revision)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let neighbors = self.collect_neighbor_solidity(coord);
+
+        if !self
+            .pipeline
+            .request_generate_chunk(coord, next_revision, neighbors)
+        {
+            return false;
+        }
+
+        let state = self.chunk_states.entry(coord).or_default();
+        state.requested_revision = next_revision;
+        state.pending_revision = Some(next_revision);
+        state.needs_remesh_after_pending = false;
+        true
+    }
+
+    fn request_remesh_chunk(&mut self, coord: ChunkCoord) -> bool {
+        let Some(chunk_snapshot) = self.chunks.get(&coord).cloned() else {
+            return false;
+        };
+        let next_revision = self
+            .chunk_states
+            .get(&coord)
+            .map(|state| state.requested_revision)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let neighbors = self.collect_neighbor_solidity(coord);
+
+        if !self
+            .pipeline
+            .request_remesh(coord, next_revision, chunk_snapshot, neighbors)
+        {
+            return false;
+        }
+
+        let state = self
+            .chunk_states
+            .entry(coord)
+            .or_insert_with(|| Self::resident_state_for_loaded_chunk());
+        state.requested_revision = next_revision;
+        state.pending_revision = Some(next_revision);
+        state.needs_remesh_after_pending = false;
+        state.resident_state = ChunkResidentState::Resident;
+        true
+    }
+
+    fn defer_remesh_until_pending_finishes(&mut self, coord: ChunkCoord) -> bool {
+        let state = self
+            .chunk_states
+            .entry(coord)
+            .or_insert_with(|| Self::resident_state_for_loaded_chunk());
+
+        if state.pending_revision.is_none() || state.needs_remesh_after_pending {
+            return false;
+        }
+
+        state.requested_revision = state
+            .requested_revision
+            .max(state.pending_revision.unwrap_or(0))
+            .saturating_add(1);
+        state.needs_remesh_after_pending = true;
+        true
+    }
+
+    fn queue_deferred_remesh_if_needed(&mut self, coord: ChunkCoord) -> bool {
+        let (revision, should_request) = {
+            let Some(state) = self.chunk_states.get(&coord) else {
+                return false;
+            };
+            (
+                state.requested_revision,
+                state.needs_remesh_after_pending
+                    && state.pending_revision.is_none()
+                    && state.requested_revision > state.integrated_revision
+                    && self.chunks.contains_key(&coord),
+            )
+        };
+
+        if !should_request {
+            return false;
+        }
+
+        let Some(chunk_snapshot) = self.chunks.get(&coord).cloned() else {
+            return false;
+        };
+        let neighbors = self.collect_neighbor_solidity(coord);
+
+        if !self
+            .pipeline
+            .request_remesh(coord, revision, chunk_snapshot, neighbors)
+        {
+            return false;
+        }
+
+        if let Some(state) = self.chunk_states.get_mut(&coord) {
+            state.pending_revision = Some(revision);
+            state.needs_remesh_after_pending = false;
+            return true;
+        }
+
+        false
+    }
+
+    fn integrate_chunk_result(&mut self, center_chunk: ChunkCoord, built: ChunkBuildResult) -> bool {
+        let Some(state_snapshot) = self.chunk_states.get(&built.coord).copied() else {
+            return false;
+        };
+
+        let waiting_for_followup =
+            state_snapshot.needs_remesh_after_pending && built.revision < state_snapshot.requested_revision;
+
+        if built.revision <= state_snapshot.integrated_revision
+            || (built.revision < state_snapshot.requested_revision && !waiting_for_followup)
+        {
+            return false;
+        }
+
+        if let Some(state) = self.chunk_states.get_mut(&built.coord)
+            && state.pending_revision == Some(built.revision)
+        {
+            state.pending_revision = None;
+        }
+
+        let mut chunk_changed = false;
+        match built.output {
+            ChunkBuildOutput::BuiltMesh(mesh) => {
+                chunk_changed = self
+                    .chunks
+                    .get(&built.coord)
+                    .map(|existing| existing != &built.chunk)
+                    .unwrap_or(true);
+                self.chunks.insert(built.coord, built.chunk);
+                self.meshes.insert(built.coord, mesh.clone());
+                self.mesh_updates.push_back(ChunkMeshUpdate::Upsert {
+                    coord: built.coord,
+                    mesh,
+                });
+                if let Some(state) = self.chunk_states.get_mut(&built.coord) {
+                    state.resident_state = ChunkResidentState::Resident;
+                }
+            }
+            ChunkBuildOutput::BuiltEmptyButValid => {
+                chunk_changed = self
+                    .chunks
+                    .get(&built.coord)
+                    .map(|existing| existing != &built.chunk)
+                    .unwrap_or(true);
+                self.chunks.insert(built.coord, built.chunk);
+                self.meshes.remove(&built.coord);
+                self.mesh_updates
+                    .push_back(ChunkMeshUpdate::Remove { coord: built.coord });
+                if let Some(state) = self.chunk_states.get_mut(&built.coord) {
+                    state.resident_state = ChunkResidentState::Resident;
+                }
+            }
+            ChunkBuildOutput::SkippedOrNotReady | ChunkBuildOutput::Failed => {}
+        }
+
+        if let Some(state) = self.chunk_states.get_mut(&built.coord) {
+            state.integrated_revision = built.revision;
+        }
+
+        if chunk_changed {
+            self.mark_adjacent_chunks_dirty_for_remesh(built.coord);
+        }
+
+        let _ = self.queue_deferred_remesh_if_needed(built.coord);
+
+        if !self.is_within_retention(center_chunk, built.coord) {
+            return false;
+        }
+
+        true
+    }
+
     fn chunk_distance_sq(coord: ChunkCoord, center: ChunkCoord) -> i64 {
         let dx = i64::from(coord.x - center.x);
         let dy = i64::from(coord.y - center.y);
@@ -415,7 +619,7 @@ impl VoxelWorld {
             keep
         });
 
-        self.pending.retain(|coord| is_within(*coord));
+        self.chunk_states.retain(|coord, _| is_within(*coord));
         self.integration_backlog
             .retain(|built| is_within(built.coord));
 
@@ -447,8 +651,9 @@ mod tests {
     fn chunk_result(coord: ChunkCoord) -> ChunkBuildResult {
         ChunkBuildResult {
             coord,
+            revision: 1,
             chunk: ChunkData::new(coord),
-            mesh: ChunkMesh::default(),
+            output: ChunkBuildOutput::BuiltEmptyButValid,
         }
     }
 
@@ -457,7 +662,20 @@ mod tests {
         chunk.set_block(LocalCoord::new(0, 0, 0), BlockType::Stone);
         let mesh = build_chunk_mesh(&chunk);
 
-        ChunkBuildResult { coord, chunk, mesh }
+        ChunkBuildResult {
+            coord,
+            revision: 1,
+            chunk,
+            output: ChunkBuildOutput::BuiltMesh(mesh),
+        }
+    }
+
+    fn resident_state(integrated_revision: u64) -> ChunkRuntimeState {
+        ChunkRuntimeState {
+            integrated_revision,
+            resident_state: ChunkResidentState::Resident,
+            ..ChunkRuntimeState::default()
+        }
     }
 
     #[test]
@@ -484,7 +702,15 @@ mod tests {
         world.chunks.insert(far, ChunkData::new(far));
         world.meshes.insert(near, ChunkMesh::default());
         world.meshes.insert(far, ChunkMesh::default());
-        world.pending.insert(far);
+        world.chunk_states.insert(
+            far,
+            ChunkRuntimeState {
+                requested_revision: 1,
+                pending_revision: Some(1),
+                resident_state: ChunkResidentState::Resident,
+                ..ChunkRuntimeState::default()
+            },
+        );
         world.integration_backlog.push_back(chunk_result(far));
 
         world.tick(Vec3::ZERO);
@@ -492,7 +718,7 @@ mod tests {
         assert!(world.chunks.contains_key(&near));
         assert!(!world.chunks.contains_key(&far));
         assert!(!world.meshes.contains_key(&far));
-        assert!(!world.pending.contains(&far));
+        assert!(!world.chunk_states.contains_key(&far));
         assert!(
             world
                 .integration_backlog
@@ -520,12 +746,15 @@ mod tests {
         world
             .integration_backlog
             .push_back(chunk_result(ChunkCoord::new(0, 0, 0)));
+        world.chunk_states.insert(ChunkCoord::new(0, 0, 0), ChunkRuntimeState::default());
         world
             .integration_backlog
             .push_back(chunk_result(ChunkCoord::new(1, 0, 0)));
+        world.chunk_states.insert(ChunkCoord::new(1, 0, 0), ChunkRuntimeState::default());
         world
             .integration_backlog
             .push_back(chunk_result(ChunkCoord::new(2, 0, 0)));
+        world.chunk_states.insert(ChunkCoord::new(2, 0, 0), ChunkRuntimeState::default());
 
         let report = world.tick(Vec3::ZERO);
 
@@ -543,6 +772,7 @@ mod tests {
         world.chunk_retention_vertical_radius = 8;
 
         let coord = ChunkCoord::new(0, 0, 0);
+        world.chunk_states.insert(coord, ChunkRuntimeState::default());
         world
             .integration_backlog
             .push_back(solid_chunk_result(coord));
@@ -579,6 +809,8 @@ mod tests {
         let east = ChunkCoord::new(1, 0, 0);
 
         world.chunks.insert(center, ChunkData::new(center));
+        world.chunk_states.insert(center, resident_state(0));
+        world.chunk_states.insert(east, ChunkRuntimeState::default());
 
         let mut changed_chunk = ChunkData::new(east);
         changed_chunk.set_block(LocalCoord::new(0, 0, 0), BlockType::Stone);
@@ -586,8 +818,9 @@ mod tests {
 
         world.integration_backlog.push_back(ChunkBuildResult {
             coord: east,
+            revision: 1,
             chunk: changed_chunk,
-            mesh: changed_mesh,
+            output: ChunkBuildOutput::BuiltMesh(changed_mesh),
         });
 
         world.tick(Vec3::ZERO);
@@ -613,16 +846,19 @@ mod tests {
         let east = ChunkCoord::new(1, 0, 0);
 
         world.chunks.insert(center, ChunkData::new(center));
+        world.chunk_states.insert(center, resident_state(0));
 
         let mut existing_chunk = ChunkData::new(east);
         existing_chunk.set_block(LocalCoord::new(0, 0, 0), BlockType::Stone);
         world.chunks.insert(east, existing_chunk.clone());
+        world.chunk_states.insert(east, resident_state(0));
 
         let existing_mesh = build_chunk_mesh(&existing_chunk);
         world.integration_backlog.push_back(ChunkBuildResult {
             coord: east,
+            revision: 1,
             chunk: existing_chunk,
-            mesh: existing_mesh,
+            output: ChunkBuildOutput::BuiltMesh(existing_mesh),
         });
 
         world.tick(Vec3::ZERO);
@@ -634,6 +870,137 @@ mod tests {
                 .iter()
                 .any(|coord| *coord == center)
         );
+    }
+
+    #[test]
+    fn stale_chunk_completion_does_not_override_newer_state() {
+        let mut world = VoxelWorld::new(13, 1);
+        world.horizontal_radius = -1;
+        world.vertical_radius = -1;
+        world.chunk_retention_horizontal_radius = 8;
+        world.chunk_retention_vertical_radius = 8;
+
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut current_chunk = ChunkData::new(coord);
+        current_chunk.set_block(LocalCoord::new(0, 0, 0), BlockType::Stone);
+        let current_mesh = build_chunk_mesh(&current_chunk);
+
+        world.chunks.insert(coord, current_chunk.clone());
+        world.meshes.insert(coord, current_mesh.clone());
+        world.chunk_states.insert(
+            coord,
+            ChunkRuntimeState {
+                requested_revision: 2,
+                integrated_revision: 2,
+                resident_state: ChunkResidentState::Resident,
+                ..ChunkRuntimeState::default()
+            },
+        );
+
+        world.integration_backlog.push_back(ChunkBuildResult {
+            coord,
+            revision: 1,
+            chunk: ChunkData::new(coord),
+            output: ChunkBuildOutput::BuiltEmptyButValid,
+        });
+
+        let report = world.tick(Vec3::ZERO);
+
+        assert_eq!(report.completed, 0);
+        assert_eq!(world.chunks.get(&coord), Some(&current_chunk));
+        assert!(world.meshes.contains_key(&coord));
+        assert!(world.drain_mesh_updates(4).is_empty());
+    }
+
+    #[test]
+    fn dirty_chunk_marked_while_pending_requests_followup_remesh() {
+        let mut world = VoxelWorld::new(13, 1);
+        world.horizontal_radius = -1;
+        world.vertical_radius = -1;
+        world.chunk_retention_horizontal_radius = 8;
+        world.chunk_retention_vertical_radius = 8;
+
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut chunk = ChunkData::new(coord);
+        chunk.set_block(LocalCoord::new(0, 0, 0), BlockType::Stone);
+        let mesh = build_chunk_mesh(&chunk);
+
+        world.chunks.insert(coord, chunk.clone());
+        world.chunk_states.insert(
+            coord,
+            ChunkRuntimeState {
+                requested_revision: 1,
+                integrated_revision: 0,
+                pending_revision: Some(1),
+                resident_state: ChunkResidentState::Resident,
+                ..ChunkRuntimeState::default()
+            },
+        );
+
+        assert!(world.mark_chunk_dirty_for_remesh(coord));
+
+        world.integration_backlog.push_back(ChunkBuildResult {
+            coord,
+            revision: 1,
+            chunk,
+            output: ChunkBuildOutput::BuiltMesh(mesh),
+        });
+
+        let report = world.tick(Vec3::ZERO);
+
+        assert_eq!(report.completed, 1);
+        let state = world.chunk_states.get(&coord).copied().unwrap();
+        assert_eq!(state.requested_revision, 2);
+        assert_eq!(state.pending_revision, Some(2));
+        assert!(!state.needs_remesh_after_pending);
+    }
+
+    #[test]
+    fn resident_chunk_does_not_flicker_absent_on_failed_build_output() {
+        let mut world = VoxelWorld::new(13, 1);
+        world.horizontal_radius = -1;
+        world.vertical_radius = -1;
+        world.chunk_retention_horizontal_radius = 8;
+        world.chunk_retention_vertical_radius = 8;
+
+        let coord = ChunkCoord::new(0, 0, 0);
+        let mut chunk = ChunkData::new(coord);
+        chunk.set_block(LocalCoord::new(0, 0, 0), BlockType::Stone);
+        let mesh = build_chunk_mesh(&chunk);
+
+        world.chunks.insert(coord, chunk.clone());
+        world.meshes.insert(coord, mesh);
+        world.chunk_states.insert(coord, resident_state(1));
+
+        world.integration_backlog.push_back(ChunkBuildResult {
+            coord,
+            revision: 2,
+            chunk: ChunkData::new(coord),
+            output: ChunkBuildOutput::Failed,
+        });
+
+        let report = world.tick(Vec3::ZERO);
+
+        assert_eq!(report.completed, 1);
+        assert_eq!(world.chunks.get(&coord), Some(&chunk));
+        assert!(world.meshes.contains_key(&coord));
+        assert!(world.drain_mesh_updates(2).is_empty());
+    }
+
+    #[test]
+    fn chunk_border_change_marks_loaded_neighbor_dirty() {
+        let mut world = VoxelWorld::new(13, 1);
+        let center = ChunkCoord::new(0, 0, 0);
+        let east = ChunkCoord::new(1, 0, 0);
+
+        world.chunks.insert(center, ChunkData::new(center));
+        world.chunks.insert(east, ChunkData::new(east));
+
+        let changed = world.set_block_world(IVec3::new(15, 0, 0), BlockType::Stone);
+
+        assert!(changed);
+        assert!(world.dirty_remesh_set.contains(&center));
+        assert!(world.dirty_remesh_set.contains(&east));
     }
 
     #[test]

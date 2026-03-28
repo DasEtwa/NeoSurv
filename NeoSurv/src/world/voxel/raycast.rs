@@ -4,9 +4,6 @@ use crate::world::voxel::block::BlockType;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RaycastHit {
-    pub(crate) block: BlockType,
-    pub(crate) block_pos: IVec3,
-    pub(crate) previous_pos: IVec3,
     pub(crate) distance: f32,
 }
 
@@ -25,7 +22,6 @@ where
     }
 
     let mut voxel = origin.floor().as_ivec3();
-    let mut previous = voxel;
 
     let step = IVec3::new(signum_i32(dir.x), signum_i32(dir.y), signum_i32(dir.z));
 
@@ -60,16 +56,11 @@ where
             break;
         }
 
-        if let Some(block) = sample(voxel).filter(|block| block.is_solid()) {
+        if sample(voxel).is_some_and(|block| block.is_solid()) {
             return Some(RaycastHit {
-                block,
-                block_pos: voxel,
-                previous_pos: previous,
                 distance: traveled,
             });
         }
-
-        previous = voxel;
 
         if t_max.x < t_max.y {
             if t_max.x < t_max.z {
@@ -137,10 +128,8 @@ mod tests {
         )
         .expect("ray should hit");
 
-        assert_eq!(hit.block, BlockType::Stone);
-        assert_eq!(hit.block_pos, IVec3::new(3, 0, 0));
-        assert_eq!(hit.previous_pos, IVec3::new(2, 0, 0));
         assert!(hit.distance <= 3.0);
+        assert!(hit.distance >= 2.0);
     }
 
     #[test]

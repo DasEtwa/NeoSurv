@@ -1,10 +1,20 @@
+## Build output
 **/target/
 **/build/
+
+## Local Rust overrides
 /.cargo/
+
+## Editor / temp files
 .idea/
 .vscode/
 *.swp
 *.tmp
+
+## Local workspace notes
 /TODO.md
 /CONTEXT.md
-/Neosurv/saves/
+/ideen.md
+
+## Local runtime data
+/NeoSurv/saves/
