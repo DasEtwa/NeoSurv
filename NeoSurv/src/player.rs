@@ -235,19 +235,6 @@ impl Player {
         }
     }
 
-    pub(crate) fn clamp_to_world_border(&mut self, walkable_half_extent: f32) {
-        self.camera.position.x = self
-            .camera
-            .position
-            .x
-            .clamp(-walkable_half_extent, walkable_half_extent);
-        self.camera.position.z = self
-            .camera
-            .position
-            .z
-            .clamp(-walkable_half_extent, walkable_half_extent);
-    }
-
     fn collision_offsets() -> [Vec3; 5] {
         [
             Vec3::ZERO,

@@ -2,7 +2,7 @@
 
 Diese Implementierung ist bewusst ein kleiner Game-Vertical-Slice und keine allgemeine Engine-Asset-Pipeline.
 
-## Aktuell unterstützt
+## Aktuell unterstuetzt
 
 - `.obj` als erstes Modellformat
 - triangulierte Meshes via `tobj`
@@ -11,13 +11,13 @@ Diese Implementierung ist bewusst ein kleiner Game-Vertical-Slice und keine allg
 - UVs
 - Normals
 - optionale `.mtl`-Dateien
-- `.mtl` Diffuse-Farbe (`Kd`) wird als Basisfarbe ins Rendering übernommen
+- `.mtl` Diffuse-Farbe (`Kd`) wird als Basisfarbe ins Rendering uebernommen
 
-## Aktuell nicht unterstützt
+## Aktuell nicht unterstuetzt
 
 - komplexe MTL-Features wie Specular-, Roughness-, Emission- oder Transparenz-Workflows
-- Material-Parameter außer Diffuse-Farbe
-- Textur-Upload und Textur-Sampling für OBJ-Modelle
+- Material-Parameter ausser Diffuse-Farbe
+- Textur-Upload und Textur-Sampling fuer OBJ-Modelle
 - Skelettanimationen
 - dynamische Runtime-Instancing-API
 - Modellrotation/Transform per GPU-Uniform
@@ -31,7 +31,7 @@ Der erste Testpfad liegt projektintern unter:
 - `assets/models/pistol_1/Pistol_1.obj`
 - `assets/models/pistol_1/Pistol_1.mtl`
 
-Quelle dafür war initial:
+Quelle dafuer war initial:
 
 - `Z:\workspace\game-engine\Ressourcen\OBJ`
 
@@ -39,7 +39,7 @@ Damit ist die Runtime nicht an einen absoluten lokalen Pfad gebunden.
 
 ## Runtime-Nutzung
 
-Der erste harte Spawn passiert aktuell in [engine.rs](/Z:/workspace/game-engine/src/engine.rs).
+Der erste harte Spawn passiert aktuell in [engine.rs](/Z:/workspace/NeoSurv/src/engine.rs).
 
 Verwendet wird:
 
@@ -47,7 +47,7 @@ Verwendet wird:
 - feste Weltposition vor dem Spawnbereich
 - fester Uniform-Scale-Wert
 
-Der Ladepfad läuft über [model.rs](/Z:/workspace/game-engine/src/game/model.rs) und der Upload/Draw-Pfad über [mod.rs](/Z:/workspace/game-engine/src/renderer/mod.rs).
+Der Ladepfad laeuft ueber [model.rs](/Z:/workspace/NeoSurv/src/game/model.rs) und der Upload/Draw-Pfad ueber [mod.rs](/Z:/workspace/NeoSurv/src/renderer/mod.rs).
 
 ## Neue Modelle ablegen
 
@@ -55,17 +55,17 @@ Neue OBJ-Modelle bitte so ablegen:
 
 1. Unter `assets/models/<dein_modell>/`
 2. `.obj` und optionale `.mtl` in denselben Ordner
-3. referenzierte Texturen später ebenfalls in denselben Ordner, damit relative Materialpfade stabil bleiben
+3. referenzierte Texturen spaeter ebenfalls in denselben Ordner, damit relative Materialpfade stabil bleiben
 
 ## Neue Modelle nutzen
 
-Für den aktuellen Stand reicht:
+Fuer den aktuellen Stand reicht:
 
 1. Pfad in `src/engine.rs` auf das neue `.obj` setzen
 2. Spawn-Position und Scale anpassen
 3. Spiel starten
 
-## Praktische Einschränkungen
+## Praktische Einschraenkungen
 
 - Der Spawn ist aktuell hart codiert.
 - Modelltransforms werden zur Zeit CPU-seitig in die Vertex-Positionen eingebacken.
