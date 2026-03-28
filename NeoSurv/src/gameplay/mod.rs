@@ -8,7 +8,11 @@ mod weapons;
 
 use glam::{IVec3, Vec3};
 
-use crate::{inventory::ItemId, renderer::StaticModelMesh, world::camera::Camera};
+use crate::{
+    inventory::ItemId,
+    renderer::{MeshInstance, StaticModelMesh},
+    world::camera::Camera,
+};
 
 use self::{
     hitscan::fire_hitscan_shot,
@@ -103,10 +107,24 @@ impl CombatState {
         self.projectiles.tick(dt_seconds, enemies, is_solid);
     }
 
-    pub(crate) fn build_world_static_meshes(&self, enemies: &EnemyRoster) -> Vec<StaticModelMesh> {
-        let mut meshes = enemies.build_meshes();
-        meshes.extend(self.projectiles.build_meshes());
-        meshes
+    pub(crate) fn dynamic_templates(&self) -> Vec<StaticModelMesh> {
+        let mut templates = EnemyRoster::build_templates();
+        templates.extend(ProjectileSystem::build_templates());
+        templates
+    }
+
+    pub(crate) fn dynamic_instances(&self, enemies: &EnemyRoster) -> Vec<MeshInstance> {
+        let mut instances = enemies.build_instances();
+        instances.extend(self.projectiles.build_instances());
+        instances
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn viewmodel_templates(&self, selected_item: Option<ItemId>) -> Vec<StaticModelMesh> {
+        let weapon = selected_item
+            .and_then(|item_id| self.weapon_for_item(item_id))
+            .unwrap_or(self.primary_weapon);
+        self.viewmodel.build_template_meshes(weapon)
     }
 
     pub(crate) fn build_viewmodel_meshes(
@@ -119,5 +137,18 @@ impl CombatState {
             .unwrap_or(self.primary_weapon);
         self.viewmodel
             .build_meshes(camera, &self.weapon_effects, weapon)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn viewmodel_instances(
+        &self,
+        camera: &Camera,
+        selected_item: Option<ItemId>,
+    ) -> Vec<MeshInstance> {
+        let weapon = selected_item
+            .and_then(|item_id| self.weapon_for_item(item_id))
+            .unwrap_or(self.primary_weapon);
+        self.viewmodel
+            .build_instances(camera, &self.weapon_effects, weapon)
     }
 }

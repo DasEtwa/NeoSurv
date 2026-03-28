@@ -15,11 +15,12 @@ use winit::{
 };
 
 use crate::{
-    chat::ChatState,
+    chat::{ChatState, ChatVisualState},
     commands::{CommandContext, CommandRegistry},
     config::AppConfig,
     gameplay::CombatState,
     hud,
+    inventory::ItemId,
     input::handler::InputHandler,
     menu::{MenuCommand, StartMenuState},
     player::Player,
@@ -30,7 +31,7 @@ use crate::{
     world::{
         save::WorldSaveManager,
         state::WorldRuntimeState,
-        voxel::{ChunkMeshUpdate, VoxelWorld},
+        voxel::{chunk::ChunkCoord, ChunkMeshUpdate, VoxelWorld},
     },
 };
 
@@ -46,9 +47,6 @@ const CHUNK_VISIBILITY_RADIUS: u32 = 4;
 const MAX_MESH_UPDATES_TO_RENDERER_PER_FRAME: usize = 64;
 const CHUNK_UPLOAD_BUDGET_BYTES_PER_FRAME: usize = 2 * 1024 * 1024;
 const STREAM_TELEMETRY_INTERVAL_FRAMES: u64 = 120;
-const WORLD_BORDER_SIZE_BLOCKS: f32 = 250.0;
-const WORLD_BORDER_HALF_EXTENT: f32 = WORLD_BORDER_SIZE_BLOCKS * 0.5;
-const WORLD_BORDER_WALKABLE_HALF_EXTENT: f32 = WORLD_BORDER_HALF_EXTENT - 1.0 - 0.25;
 const SPAWN_SURFACE_SEARCH_TOP_Y: i32 = 96;
 const SPAWN_SURFACE_SEARCH_BOTTOM_Y: i32 = -32;
 
@@ -69,6 +67,28 @@ fn find_surface_height_in_world(voxel_world: &VoxelWorld, x: i32, z: i32) -> Opt
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HudTemplateKey {
+    health: i32,
+    max_health: i32,
+    time_chip: String,
+    selected_weapon_slot: usize,
+    selected_weapon_item: Option<ItemId>,
+    slot_counts: [u32; 4],
+    chat: ChatVisualState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ViewLayerTemplateKey {
+    Menu {
+        world_name: String,
+        selected_button: usize,
+    },
+    Gameplay {
+        hud: HudTemplateKey,
+    },
+}
+
 struct EngineApp {
     config: AppConfig,
     window: Option<Arc<Window>>,
@@ -77,6 +97,8 @@ struct EngineApp {
     runtime_state: WorldRuntimeState,
     cached_world_meshes: Vec<crate::renderer::StaticModelMesh>,
     world_meshes_dirty: bool,
+    dynamic_templates_dirty: bool,
+    current_view_layer_key: Option<ViewLayerTemplateKey>,
     input: InputHandler,
     voxel_world: VoxelWorld,
     player: Player,
@@ -113,6 +135,8 @@ impl EngineApp {
             runtime_state: WorldRuntimeState::new_singleplayer(world_seed),
             cached_world_meshes: Vec::new(),
             world_meshes_dirty: true,
+            dynamic_templates_dirty: true,
+            current_view_layer_key: None,
             input: InputHandler::default(),
             voxel_world: VoxelWorld::new(world_seed, default_voxel_worker_count()),
             start: Instant::now(),
@@ -154,6 +178,8 @@ impl EngineApp {
         self.combat.reset();
         self.chat.close();
         self.world_meshes_dirty = true;
+        self.dynamic_templates_dirty = true;
+        self.current_view_layer_key = None;
     }
 
     fn restore_selected_world_runtime(&mut self) {
@@ -167,6 +193,8 @@ impl EngineApp {
         self.runtime_state.terrain_snap(world.seed);
         self.combat.reset();
         self.world_meshes_dirty = true;
+        self.dynamic_templates_dirty = true;
+        self.current_view_layer_key = None;
 
         if let Some(saved_pose) = self.runtime_state.local_player_pose() {
             self.player.restore_saved_pose(saved_pose);
@@ -177,6 +205,49 @@ impl EngineApp {
             seed = world.seed,
             "selected world restored"
         );
+    }
+
+    fn current_view_layer_key(&self) -> ViewLayerTemplateKey {
+        if self.menu_open {
+            return ViewLayerTemplateKey::Menu {
+                world_name: self.world_saves.selected_world_name(),
+                selected_button: self.start_menu.selected_button(),
+            };
+        }
+
+        let player = self.runtime_state.local_player();
+        let selected_weapon_item = self.runtime_state.selected_weapon_item();
+        let selected_weapon_slot = player
+            .map(|player| player.inventory.selected_weapon_slot)
+            .unwrap_or(0);
+        let mut slot_counts = [0u32; 4];
+        if let Some(player) = player {
+            for (index, count) in slot_counts.iter_mut().enumerate() {
+                *count = player
+                    .inventory
+                    .slots
+                    .get(index)
+                    .and_then(|slot| slot.stack)
+                    .map(|stack| stack.count)
+                    .unwrap_or(0);
+            }
+        }
+
+        let hud = HudTemplateKey {
+            health: player.map(|player| player.health).unwrap_or(0),
+            max_health: player.map(|player| player.max_health).unwrap_or(1),
+            time_chip: format!(
+                "{} D{}",
+                self.runtime_state.time_of_day.label(),
+                self.runtime_state.time_of_day.elapsed_days
+            ),
+            selected_weapon_slot,
+            selected_weapon_item,
+            slot_counts,
+            chat: self.chat.visual_state(),
+        };
+
+        ViewLayerTemplateKey::Gameplay { hud }
     }
 
     fn save_selected_world_runtime(&mut self) {
@@ -243,11 +314,6 @@ impl EngineApp {
             .unwrap_or(false)
     }
 
-    fn clamp_to_world_border(&mut self) {
-        self.player
-            .clamp_to_world_border(WORLD_BORDER_WALKABLE_HALF_EXTENT);
-    }
-
     fn set_mouse_captured(&mut self, captured: bool) {
         if self.mouse_captured == captured {
             self.menu_open = !captured;
@@ -275,8 +341,11 @@ impl EngineApp {
                 Err(err) => {
                     window.set_cursor_visible(true);
                     self.mouse_captured = false;
-                    self.menu_open = true;
-                    tracing::warn!(?err, "failed to capture mouse cursor");
+                    self.menu_open = false;
+                    tracing::warn!(
+                        ?err,
+                        "failed to hard-capture mouse cursor, continuing in gameplay without mouse-look capture"
+                    );
                 }
             }
         } else {
@@ -365,7 +434,7 @@ impl EngineApp {
                 for line in outcome.lines {
                     self.chat.push_system_line(line);
                 }
-                self.world_meshes_dirty = true;
+                self.world_meshes_dirty |= outcome.world_changed;
                 if outcome.save_requested {
                     self.save_selected_world_runtime();
                 }
@@ -422,7 +491,6 @@ impl EngineApp {
             dt_seconds,
             |world| voxel_world.block_at_world(world).is_some(),
         );
-        self.clamp_to_world_border();
 
         let voxel_report = self.voxel_world.tick(self.player.position());
         let _ = self
@@ -434,7 +502,6 @@ impl EngineApp {
             dt_seconds,
             |world| self.voxel_world.block_at_world(world).is_some(),
         );
-        self.clamp_to_world_border();
         if !simulation_paused {
             self.runtime_state.time_of_day.advance(dt_seconds);
             self.runtime_state
@@ -567,25 +634,22 @@ impl EngineApp {
             view: self.player.view_matrix(),
             projection: self.player.projection_matrix(aspect_ratio),
         };
-        let dynamic_world_meshes = self
-            .combat
-            .build_world_static_meshes(&self.runtime_state.enemies);
-        let viewmodel_meshes = if self.menu_open {
-            self.start_menu.build_meshes(
-                self.player.camera(),
-                &self.world_saves.selected_world_name(),
-            )
+        let selected_item = self.runtime_state.selected_weapon_item();
+        let dynamic_instances = self.combat.dynamic_instances(&self.runtime_state.enemies);
+        let viewmodel_instances = if self.menu_open {
+            self.start_menu.build_instances(self.player.camera())
         } else {
-            let mut meshes = self.combat.build_viewmodel_meshes(
-                self.player.camera(),
-                self.runtime_state.selected_weapon_item(),
+            let mut instances = Vec::new();
+            instances.extend(
+                self.combat
+                    .viewmodel_instances(self.player.camera(), selected_item),
             );
-            meshes.extend(hud::build_hud_meshes(
+            instances.extend(hud::build_hud_instances(
                 self.player.camera(),
                 &self.runtime_state,
                 &self.chat,
             ));
-            meshes
+            instances
         };
 
         let visible_chunk_coords = self.voxel_world.visible_chunk_coords(
@@ -595,6 +659,23 @@ impl EngineApp {
             camera_matrices.projection,
         );
 
+        let view_layer_key = self.current_view_layer_key();
+        let viewmodel_templates_to_sync =
+            if self.current_view_layer_key.as_ref() != Some(&view_layer_key) {
+                Some(if self.menu_open {
+                    self.start_menu
+                        .build_templates(&self.world_saves.selected_world_name())
+                } else {
+                    let mut templates = Vec::new();
+                    templates.extend(self.combat.viewmodel_templates(selected_item));
+                    templates.extend(hud::build_hud_templates(&self.runtime_state, &self.chat));
+                    templates.extend(self.chat.build_overlay_templates());
+                    templates
+                })
+            } else {
+                None
+            };
+
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -603,6 +684,16 @@ impl EngineApp {
             self.cached_world_meshes = self.runtime_state.build_world_meshes();
             renderer.replace_static_model_meshes(self.cached_world_meshes.clone());
             self.world_meshes_dirty = false;
+        }
+
+        if self.dynamic_templates_dirty {
+            renderer.sync_dynamic_model_templates(self.combat.dynamic_templates());
+            self.dynamic_templates_dirty = false;
+        }
+
+        if let Some(templates) = viewmodel_templates_to_sync {
+            renderer.sync_viewmodel_templates(templates);
+            self.current_view_layer_key = Some(view_layer_key);
         }
 
         for update in chunk_updates {
@@ -616,9 +707,11 @@ impl EngineApp {
             }
         }
 
+        renderer.set_chunk_upload_focus(ChunkCoord::from_world(self.player.position().floor().as_ivec3()));
         renderer.set_visible_chunks(visible_chunk_coords);
-        renderer.replace_dynamic_model_meshes(dynamic_world_meshes);
-        renderer.replace_viewmodel_meshes(viewmodel_meshes);
+        renderer.replace_viewmodel_meshes(Vec::new());
+        renderer.replace_dynamic_model_instances(dynamic_instances);
+        renderer.replace_viewmodel_instances(viewmodel_instances);
         renderer.update_camera_matrices(camera_matrices);
 
         if self.frame_index.is_multiple_of(240) {
@@ -707,6 +800,9 @@ impl EngineApp {
             "renderer initialized"
         );
 
+        self.world_meshes_dirty = true;
+        self.dynamic_templates_dirty = true;
+        self.current_view_layer_key = None;
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.set_mouse_captured(false);

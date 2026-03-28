@@ -1,7 +1,10 @@
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::{renderer::StaticModelMesh, world::state::PlayerRuntimeState};
+use crate::{
+    renderer::{MeshInstance, StaticModelMesh},
+    world::state::PlayerRuntimeState,
+};
 
 use super::{
     damage::{DamageEvent, DamageResolution, resolve_damage},
@@ -271,13 +274,29 @@ impl EnemyRoster {
         }
     }
 
-    pub(crate) fn build_meshes(&self) -> Vec<StaticModelMesh> {
-        let mut meshes = Vec::with_capacity(self.enemies.len() * 2);
+    pub(crate) fn build_templates() -> Vec<StaticModelMesh> {
+        vec![
+            build_box_mesh(
+                "enemy-body-template",
+                Vec3::new(-0.40, 0.0, -0.28),
+                Vec3::new(0.40, 1.25, 0.28),
+                [1.0, 1.0, 1.0, 1.0],
+            ),
+            build_box_mesh(
+                "enemy-head-template",
+                Vec3::new(-0.28, 1.25, -0.28),
+                Vec3::new(0.28, 1.85, 0.28),
+                [1.0, 1.0, 1.0, 1.0],
+            ),
+        ]
+    }
+
+    pub(crate) fn build_instances(&self) -> Vec<MeshInstance> {
+        let mut instances = Vec::with_capacity(self.enemies.len() * 2);
 
         for enemy in &self.enemies {
             let base = enemy.position_vec3();
             let hp_ratio = (enemy.hp as f32 / enemy.max_hp.max(1) as f32).clamp(0.0, 1.0);
-
             let body_color = match enemy.brain_state {
                 EnemyBrainState::Chase | EnemyBrainState::Attack => {
                     [0.96, 0.18 + 0.40 * hp_ratio, 0.22, 1.0]
@@ -287,22 +306,19 @@ impl EnemyRoster {
                     [0.64, 0.64 * hp_ratio, 0.70, 1.0]
                 }
             };
-            let head_color = [0.94, 0.90, 0.78, 1.0];
 
-            meshes.push(build_box_mesh(
-                format!("enemy-body-{}", enemy.id),
-                base + Vec3::new(-0.40, 0.0, -0.28),
-                base + Vec3::new(0.40, 1.25, 0.28),
+            instances.push(MeshInstance::new(
+                "enemy-body-template",
+                Mat4::from_translation(base),
                 body_color,
             ));
-            meshes.push(build_box_mesh(
-                format!("enemy-head-{}", enemy.id),
-                base + Vec3::new(-0.28, 1.25, -0.28),
-                base + Vec3::new(0.28, 1.85, 0.28),
-                head_color,
+            instances.push(MeshInstance::new(
+                "enemy-head-template",
+                Mat4::from_translation(base),
+                [0.94, 0.90, 0.78, 1.0],
             ));
         }
 
-        meshes
+        instances
     }
 }

@@ -1,6 +1,6 @@
-use glam::{IVec3, Vec3};
+use glam::{IVec3, Mat4, Vec3};
 
-use crate::renderer::StaticModelMesh;
+use crate::renderer::{MeshInstance, StaticModelMesh};
 
 use super::{
     enemies::EnemyRoster,
@@ -105,16 +105,34 @@ impl ProjectileSystem {
         self.active = next_active;
     }
 
-    pub(crate) fn build_meshes(&self) -> Vec<StaticModelMesh> {
+    pub(crate) fn build_templates() -> Vec<StaticModelMesh> {
+        vec![
+            build_box_mesh(
+                "projectile-launcher-template",
+                Vec3::splat(-0.18),
+                Vec3::splat(0.18),
+                [1.0, 1.0, 1.0, 1.0],
+            ),
+            build_box_mesh(
+                "projectile-grenade-template",
+                Vec3::splat(-0.24),
+                Vec3::splat(0.24),
+                [1.0, 1.0, 1.0, 1.0],
+            ),
+        ]
+    }
+
+    pub(crate) fn build_instances(&self) -> Vec<MeshInstance> {
         self.active
             .iter()
-            .enumerate()
-            .map(|(index, projectile)| {
-                let radius = projectile.radius;
-                build_box_mesh(
-                    format!("projectile-{}-{index}", projectile.weapon_id),
-                    projectile.position - Vec3::splat(radius),
-                    projectile.position + Vec3::splat(radius),
+            .map(|projectile| {
+                let template_label = match projectile.weapon_id {
+                    "grenade" => "projectile-grenade-template",
+                    _ => "projectile-launcher-template",
+                };
+                MeshInstance::new(
+                    template_label,
+                    Mat4::from_translation(projectile.position),
                     [1.0, 0.68, 0.24, 1.0],
                 )
             })

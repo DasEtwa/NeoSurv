@@ -1,7 +1,7 @@
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use crate::{
-    renderer::{StaticModelMesh, StaticModelVertex},
+    renderer::{MeshInstance, StaticModelMesh, StaticModelVertex},
     world::camera::Camera,
 };
 
@@ -79,41 +79,28 @@ pub(crate) fn build_box_mesh(
     mesh
 }
 
-pub(crate) fn transform_overlay_mesh(
-    mesh: &StaticModelMesh,
-    label: impl Into<String>,
-    camera: &Camera,
-    offset: Vec3,
-) -> StaticModelMesh {
+pub(crate) fn camera_basis_matrix(camera: &Camera) -> Mat4 {
     let forward = camera.forward().normalize_or_zero();
     let right = camera.right().normalize_or_zero();
     let up = right.cross(forward).normalize_or_zero();
-    let origin = camera.position + right * offset.x + up * offset.y + forward * offset.z;
+    Mat4::from_cols(
+        right.extend(0.0),
+        up.extend(0.0),
+        forward.extend(0.0),
+        camera.position.extend(1.0),
+    )
+}
 
-    StaticModelMesh {
-        label: label.into(),
-        vertices: mesh
-            .vertices
-            .iter()
-            .copied()
-            .map(|vertex| {
-                let local = Vec3::from_array(vertex.position);
-                let world_position = origin + right * local.x + up * local.y + forward * local.z;
-                let local_normal = Vec3::from_array(vertex.normal);
-                let world_normal =
-                    (right * local_normal.x + up * local_normal.y + forward * local_normal.z)
-                        .normalize_or_zero();
+pub(crate) fn overlay_transform(camera: &Camera, offset: Vec3) -> Mat4 {
+    camera_basis_matrix(camera) * Mat4::from_translation(offset)
+}
 
-                StaticModelVertex {
-                    position: world_position.to_array(),
-                    normal: world_normal.to_array(),
-                    uv: vertex.uv,
-                    color: vertex.color,
-                }
-            })
-            .collect(),
-        indices: mesh.indices.clone(),
-    }
+pub(crate) fn overlay_instance(
+    template_label: impl Into<String>,
+    camera: &Camera,
+    offset: Vec3,
+) -> MeshInstance {
+    MeshInstance::new(template_label, overlay_transform(camera, offset), [1.0, 1.0, 1.0, 1.0])
 }
 
 fn append_box(mesh: &mut StaticModelMesh, min: Vec3, max: Vec3, color: [f32; 4]) {
