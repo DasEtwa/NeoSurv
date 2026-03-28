@@ -473,10 +473,14 @@ impl EngineApp {
             if self.input.consume_key_press(KeyCode::Enter)
                 && let Some(submitted) = self.chat.submit()
             {
+                let voxel_world = &self.voxel_world;
+                let mut find_surface_height =
+                    |x, z| find_surface_height_in_world(voxel_world, x, z);
                 let mut context = CommandContext {
                     world: &mut self.runtime_state,
                     player_position: self.player.position(),
                     player_forward: self.player.forward(),
+                    find_surface_height: &mut find_surface_height,
                 };
                 let outcome = self.commands.execute(&submitted, &mut context);
                 for line in outcome.lines {

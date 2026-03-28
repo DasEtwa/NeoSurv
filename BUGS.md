@@ -199,7 +199,7 @@ What was fixed:
 
 ### 10. Debug chest spawning is not terrain-snapped enough
 
-Status: open
+Status: fixed
 
 Symptoms:
 
@@ -209,6 +209,11 @@ Likely areas:
 
 - `src/commands.rs`
 - `src/world/state.rs`
+
+What was fixed:
+
+- `/spawn chest` now queries the current voxel terrain height for its target `x/z` instead of leaving the debug chest on a rounded unsnapped position
+- command-path regression coverage now checks that spawned debug chests land on `surface + 1` for the sampled terrain height
 
 ### 11. UI quality is not production-ready
 
@@ -258,6 +263,10 @@ Likely areas:
 
 - enemy spawns now search outward for valid positions instead of relying on a weak one-step offset
 - candidate positions are rejected when they are too close to the player, overlap static props, or crowd existing enemies
+
+### Fixed: debug chest spawns now snap to sampled terrain height
+
+- `/spawn chest` uses the current terrain height lookup so spawned chests no longer float or clip from unsnapped debug placement
 
 ### Fixed: chunk upload queue could not deduplicate or prioritize visible chunks
 
