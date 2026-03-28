@@ -35,7 +35,7 @@ What was fixed:
 
 ### 2. Gameplay/menu/capture state is currently unstable
 
-Status: open
+Status: fixed
 
 Symptoms:
 
@@ -55,6 +55,12 @@ Notes:
 
 - treat this as a regression introduced during the recent viewmodel / state-path work
 - this should be stabilized before more gameplay-facing bugfixes are stacked on top
+
+What was fixed:
+
+- entering menu mode now closes chat and clears pending fire/capture side effects so menu and gameplay input no longer remain half-active together
+- `Escape` now closes chat first instead of globally forcing menu mode, preventing the previous chat-plus-menu desync that could steal `WASD` or `Enter` for the wrong layer
+- capture toggles are ignored while chat is open, and focus-loss/menu transitions now go through one shared menu-open path with consistent state resets
 
 ### 3. Dynamic/UI/viewmodel meshes were too expensive per frame
 
@@ -216,6 +222,12 @@ Likely areas:
 
 - gameplay now uses a single template/instance render path for the active weapon, hand, and muzzle flash
 - HUD/chat overlay template sync also refreshes the selected weapon templates, preventing stale or missing weapon overlays after weapon/view changes
+
+### Fixed: gameplay/menu/capture state could desync and leave input half-paused
+
+- menu transitions now close chat and clear pending fire requests so gameplay and menu input layers stay mutually exclusive
+- `Escape` closes chat before opening the menu, preventing menu navigation from stealing gameplay/chat keys on the next frame
+- capture toggles are ignored while chat is open, and focus-loss transitions reuse the same menu-open path
 
 ### Fixed: chunk upload queue could not deduplicate or prioritize visible chunks
 

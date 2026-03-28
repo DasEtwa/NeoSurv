@@ -275,6 +275,7 @@ impl EngineApp {
         match command {
             MenuCommand::PlaySelectedWorld => {
                 self.restore_selected_world_runtime();
+                self.chat.close();
                 self.set_mouse_captured(true);
             }
             MenuCommand::SelectPreviousWorld => {
@@ -315,6 +316,8 @@ impl EngineApp {
     }
 
     fn set_mouse_captured(&mut self, captured: bool) {
+        self.primary_fire_requested = false;
+
         if self.mouse_captured == captured {
             self.menu_open = !captured;
             return;
@@ -359,6 +362,31 @@ impl EngineApp {
         }
 
         let _ = self.input.take_mouse_delta();
+    }
+
+    fn open_menu(&mut self) {
+        self.chat.close();
+        self.set_mouse_captured(false);
+    }
+
+    fn handle_escape_action(&mut self) {
+        self.primary_fire_requested = false;
+
+        if self.chat.is_open() {
+            self.chat.close();
+            return;
+        }
+
+        self.save_selected_world_runtime();
+        self.open_menu();
+    }
+
+    fn handle_capture_toggle(&mut self) {
+        if self.chat.is_open() {
+            return;
+        }
+
+        self.set_mouse_captured(!self.mouse_captured);
     }
 
     fn render(&mut self, event_loop: &ActiveEventLoop) {
@@ -843,19 +871,18 @@ impl ApplicationHandler for EngineApp {
         self.input.handle_window_event(&event);
         if focus_lost {
             self.input.clear();
-            self.set_mouse_captured(false);
+            self.open_menu();
         }
 
         if self.input.consume_key_press(KeyCode::Escape) {
-            self.save_selected_world_runtime();
-            self.set_mouse_captured(false);
+            self.handle_escape_action();
         }
 
         if self.input.consume_key_press(KeyCode::F1) {
-            self.set_mouse_captured(!self.mouse_captured);
+            self.handle_capture_toggle();
         }
         if self.input.consume_key_press(KeyCode::Tab) {
-            self.set_mouse_captured(!self.mouse_captured);
+            self.handle_capture_toggle();
         }
 
         match event {
@@ -868,6 +895,10 @@ impl ApplicationHandler for EngineApp {
                 button: MouseButton::Left,
                 ..
             } => {
+                if self.chat.is_open() {
+                    return;
+                }
+
                 if !self.mouse_captured {
                     self.set_mouse_captured(true);
                 }
@@ -977,5 +1008,54 @@ impl ApplicationHandler for EngineApp {
         if let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_ref()) {
             renderer.request_redraw(window);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_closes_chat_without_forcing_menu_open() {
+        let mut app = EngineApp::new(AppConfig::default());
+        app.menu_open = false;
+        app.mouse_captured = true;
+        app.chat.open();
+
+        app.handle_escape_action();
+
+        assert!(!app.chat.is_open());
+        assert!(!app.menu_open);
+        assert!(app.mouse_captured);
+    }
+
+    #[test]
+    fn open_menu_closes_chat_and_clears_pending_fire() {
+        let mut app = EngineApp::new(AppConfig::default());
+        app.menu_open = false;
+        app.mouse_captured = true;
+        app.primary_fire_requested = true;
+        app.chat.open();
+
+        app.open_menu();
+
+        assert!(app.menu_open);
+        assert!(!app.mouse_captured);
+        assert!(!app.chat.is_open());
+        assert!(!app.primary_fire_requested);
+    }
+
+    #[test]
+    fn capture_toggle_is_ignored_while_chat_is_open() {
+        let mut app = EngineApp::new(AppConfig::default());
+        app.menu_open = false;
+        app.mouse_captured = true;
+        app.chat.open();
+
+        app.handle_capture_toggle();
+
+        assert!(app.chat.is_open());
+        assert!(!app.menu_open);
+        assert!(app.mouse_captured);
     }
 }
