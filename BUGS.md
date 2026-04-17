@@ -318,6 +318,82 @@ What was fixed:
 
 - runtime chunk load/retention radius was raised to better match rendered visibility
 
+## Current Observed Issues
+
+### 12. Viewmodel depth layering is incorrect against world geometry
+
+Status: observed
+
+Symptoms:
+
+- weapon/viewmodel can appear visually detached from nearby world geometry
+- the weapon can appear in front of geometry that should feel like it is competing for the same space
+- nearby structures or props can look wrong relative to the first-person weapon presentation
+
+Likely areas:
+
+- `src/renderer/mod.rs`
+- `src/gameplay/viewmodel.rs`
+
+Notes:
+
+- current evidence points more toward viewmodel render-order or depth-state behavior than a true structure spawning issue
+- this appears to be a presentation/depth interaction problem, not necessarily incorrect world placement
+
+### 13. Weapon/viewmodel pose and presentation are still not stable enough
+
+Status: observed
+
+Symptoms:
+
+- weapon can sit too high, too centered, or otherwise feel misaligned
+- viewmodel can look visually off or oddly flat
+- first-person weapon presentation does not yet feel fully grounded or natural
+
+Likely areas:
+
+- `src/gameplay/viewmodel.rs`
+- `src/world/camera.rs`
+- weapon model/shader presentation paths
+
+Notes:
+
+- the issue appears real, but the exact root cause is not fully confirmed yet
+- likely causes include transform tuning, anchor/profile values, projection choices, or general presentation/shading limitations
+- older theories about a simple camera-basis sign mistake do not currently look like the best explanation
+
+### 14. Transient chunk holes can still appear during runtime streaming
+
+Status: observed
+
+Symptoms:
+
+- chunk holes or missing terrain can appear during movement or runtime streaming updates
+- terrain can look correct initially and then degrade temporarily while loading or moving
+
+Likely areas:
+
+- `src/world/voxel/runtime.rs`
+- `src/renderer/mod.rs`
+
+Notes:
+
+- current code already guards against several older chunk revision/remesh failure modes
+- the remaining issue currently looks more like streaming or GPU upload timing than a simple stale-revision bug
+- treat this as an active visual/runtime stability issue until reproduced and narrowed further
+
+## Not Currently Confirmed
+
+### Long-session memory leak
+
+Status: not confirmed
+
+Notes:
+
+- there is not currently enough evidence to treat this as a confirmed bug
+- queue growth or temporary backlog pressure is possible, but that is not the same as a verified leak
+- unless reproducible long-session degradation shows up, this should stay lower priority
+
 ## Workflow Note
 
 Before adding big new systems, prefer:
